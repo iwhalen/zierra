@@ -1,3 +1,7 @@
+# Local context for coding assistant
+reference/
+
+# Zig stuff
 .zig-cache/
 zig-out/
 *.o
