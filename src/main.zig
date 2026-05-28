@@ -1,4 +1,5 @@
 const std = @import("std");
+const config = @import("config.zon");
 const zierra = @import("zierra");
 
 pub fn main() !void {

@@ -13,12 +13,15 @@ runtime state. In practice:
 
 - Soup capacity, address width assumptions, owner array shape, stack depth, instruction tables, template
   limits, default config values, ancestor genome bytes, and feature toggles are known at compile time.
+  Shape and feature settings come from `src/config.zon` imported with `@import`, not from `zig build -D`
+  flags.
 - The soup's backing memory is allocated as fixed-size arrays inside a comptime-specialized type,
   rather than heap-allocating the arena on startup.
 - Zig will still initialize mutable soup contents when the simulation starts; the compile-time win is
   that capacity, storage layout, address assumptions, and bounds are known to the compiler.
-- Runtime configuration may still override evolutionary parameters such as mutation rates and RNG seed,
-  but it must not change the memory layout of an already-compiled simulation binary.
+- Runtime configuration may still override evolutionary parameters such as mutation rates and RNG seed
+  if loaded from a runtime file, but it must not change the memory layout of an already-compiled
+  simulation binary. Values imported from `src/config.zon` are compile-time constants.
 - The main simulation remains runtime behavior: creature birth/death, allocation occupancy, mutations,
   scheduling, genebank growth, lineage output, and display state are all data that evolves while running.
 - Prefer factory functions like `Soup(comptime size: u16) type` and
@@ -122,8 +125,8 @@ language as 32 instructions representable by 5 bits. Zierra should mirror that: 
 
 - `size` must fit in `u16` and should default to `60000`.
 - Compile-time assertions reject `size == 0` and values larger than `std.math.maxInt(u16)`.
-- Runtime `.zon` config does not change `size`; changing soup capacity is a build option that recompiles
-  the binary.
+- Runtime `.zon` config does not change `size`; changing `src/config.zon` and rebuilding specializes a
+  new binary.
 
 **Tests:**
 
@@ -338,40 +341,54 @@ Ties everything together. Implements the main loop from the paper.
 
 ### 9. Configuration (`src/core/config.zig`)
 
-Configuration is split into compile-time build options and runtime evolutionary settings. The split is
-intentional: values that affect type layout or array sizes are build options; values that only affect
-simulation behavior can be loaded from `.zon`.
+Configuration is split into compile-time options imported from `src/config.zon` and optional runtime
+evolutionary settings. The split is intentional: values that affect type layout, array sizes, or
+compiled-in features live in `src/config.zon`; values that only affect simulation behavior may also be
+loaded from a runtime `.zon` file later.
 
 **Contents:**
 
-- `BuildOptions` struct — comptime parameters with defaults matching original Tierra paper values:
+- `BuildOptions` struct — comptime parameters populated from `src/config.zon`, with defaults matching
+  original Tierra paper values:
   - `soup_size: u16 = 60000`
   - `stack_depth: u8 = 10`
   - `search_limit: u16 = 500` — template search max distance
   - `lineage_enabled: bool = true`
   - `display_enabled: bool = true`
-- `RuntimeConfig` struct — runtime parameters loaded from a flat `.zon` file:
+- `RuntimeConfig` struct — behavior parameters. The default values are also present in `src/config.zon`;
+  a separate runtime file may override only runtime-safe fields:
   - `reaper_threshold: f32 = 0.8` — reap when memory usage exceeds this fraction
   - `cosmic_rate: u32 = 10000` — instructions between background mutations
   - `copy_error_rate: u32 = 1000` — instructions copied between copy mutations
-  - `flaw_rate: u32 = 0` — execution flaw probability (0 = disabled)
+  - `flaw_rate: f32 = 1.5` — flaw-rate multiplier applied to copy-error rate
   - `slicer_power: f32 = 1.0` — exponent for time-slice calculation
   - `snapshot_interval: u64 = 100000` — instructions between snapshots (0 = disabled)
   - `output_dir: []const u8 = "output"` — base directory for all output
-  - `rng_seed: ?u64 = null` — null = random seed
-- `loadRuntimeFromFile(allocator: Allocator, path: []const u8) !RuntimeConfig` — reads a `.zon` file and parses it using `std.zon.fromSlice(RuntimeConfig, ...)`
+  - `rng_seed: u64 = 8675309` — deterministic seed
+- `loadRuntimeFromFile(allocator: Allocator, path: []const u8) !RuntimeConfig` — optional later feature:
+  reads a runtime-only `.zon` file and parses it using `std.zon.fromSlice(RuntimeConfig, ...)`
 - `validateBuildOptions(comptime opts: BuildOptions) void` — uses `@compileError` for impossible layouts
-- Since all fields have defaults, a partial `.zon` file works — only override what you need
-- CLI: `--config path/to/config.zon`; individual CLI flags override runtime config values
-- Build flags: `zig build -Dsoup-size=120000 -Dsearch-limit=750` recompile specialized binaries
+- `pub const build_options = BuildOptions{ ... }` — created from `@import("../config.zon")`
+- `pub const default_runtime_config = RuntimeConfig{ ... }` — created from `@import("../config.zon")`
+- Since runtime fields have defaults, a partial runtime `.zon` file works — only override what you need
+- CLI: `--config path/to/runtime.zon`; individual CLI flags override runtime-safe config values only
+- Build-shape changes: edit `src/config.zon`, then rebuild
 
-**Example config file (`config.zon`):**
+**Example config file (`src/config.zon`):**
 
 ```zon
 .{
+    .soup_size = 60000,
+    .stack_depth = 10,
+    .search_limit = 500,
+    .lineage_enabled = true,
+    .display_enabled = true,
     .cosmic_rate = 5000,
     .copy_error_rate = 500,
+    .flaw_rate = 1.5,
+    .slicer_power = 1.0,
     .snapshot_interval = 50000,
+    .output_dir = "output",
     .rng_seed = 42,
 }
 ```
@@ -381,7 +398,7 @@ simulation behavior can be loaded from `.zon`.
 - Parse `.zon` with all fields specified
 - Parse partial `.zon` (defaults fill in unspecified fields)
 - Invalid `.zon` returns error
-- Default build/runtime config matches original Tierra paper values
+- Default compile-time/runtime config matches original Tierra paper values
 - Compile-time validation rejects invalid soup size, stack depth, and template limit
 
 ---
@@ -541,10 +558,10 @@ Uses the wrapper module idiomatically for init/teardown and rendering.
   - `zig build run` — run simulation
   - `zig build test` — run all unit tests
   - `zig build test-integration` — run integration tests (requires notcurses installed)
-- Common build variants:
-  - `zig build -Dsoup-size=60000` — original Tierra-style layout
-  - `zig build -Dsoup-size=120000` — larger soup, requires recompilation
-  - `zig build -Ddisplay-enabled=false` — headless binary
+- Common compile-time variants, made by editing `src/config.zon` and rebuilding:
+  - `.soup_size = 60000` — original Tierra-style layout
+  - `.soup_size = 120000` — larger soup, requires recompilation
+  - `.display_enabled = false` — headless binary
 
 ---
 
@@ -554,8 +571,8 @@ Uses the wrapper module idiomatically for init/teardown and rendering.
 zierra/
 ├── build.zig
 ├── build.zig.zon
-├── config.zon                   # Runtime simulation config (optional)
 ├── src/
+│   ├── config.zon               # Compile-time defaults imported with @import
 │   ├── main.zig                 # CLI entry point, arg parsing, run loop
 │   ├── root.zig                 # Library root (public API re-exports)
 │   ├── core/
@@ -564,7 +581,7 @@ zierra/
 │   │   ├── cpu.zig              # CPU state, per-instruction execution
 │   │   ├── template.zig         # Template pattern search algorithms
 │   │   ├── creature.zig         # Creature struct and lifecycle
-│   │   └── config.zig           # BuildOptions, RuntimeConfig, .zon runtime loading
+│   │   └── config.zig           # BuildOptions, RuntimeConfig, config.zon import/runtime loading
 │   ├── sim/
 │   │   ├── simulation.zig       # Top-level engine, main loop
 │   │   ├── scheduler.zig        # Slicer queue + Reaper queue
@@ -880,8 +897,9 @@ const InputEvent = union(enum) {
 
 ### Config → Everything
 
-`BuildOptions` is known at compile time and determines concrete types. `RuntimeConfig` is created once
-at startup and passed by value or `*const` to modules that need behavior knobs:
+`BuildOptions` is known at compile time and determines concrete types. It is derived from
+`src/config.zon` through `@import`. `RuntimeConfig` is created once at startup and passed by value or
+`*const` to modules that need behavior knobs:
 
 ```
 const Sim = Simulation(build_options);
@@ -906,8 +924,8 @@ Each phase produces a testable, runnable artifact.
 
 ### Phase 1: Compile-Time Shape
 
-1. `core/config.zig` — `BuildOptions`, `RuntimeConfig`, compile-time validation, `.zon` runtime loading
-2. `build.zig` — wire `-Dsoup-size`, `-Dsearch-limit`, `-Dstack-depth`, feature flags into `build_options`
+1. `config.zon` implemented.
+2. `build.zig` — normal build/test steps; no project-specific build flags for simulation shape
 3. `core/instruction.zig` — Instruction enum, encode/decode, complement, isNop, comptime instruction tables
 4. `core/soup.zig` — `Soup(comptime size)` with fixed arrays, read/write, allocate/deallocate
 5. `core/cpu.zig` — `Cpu(comptime opts)` with fixed stack, stack ops, register ops (no execution yet)
@@ -991,12 +1009,12 @@ Run with: `zig build test` (unit + integration), `zig build test-integration` (d
 | Mutation bit range   | Only bit positions `0..4` of each instruction byte                                                                | Matches the paper's 60,000 instructions totaling 300,000 mutable bits                                                |
 | Soup addressing      | `u16`                                                                                                             | Supports up to 64K soups; matches the paper's ~60K default and keeps memory compact                                  |
 | Soup storage         | `Soup(comptime size)` with `[size]u8` and `[size]?CreatureId`                                                     | Moves arena shape and capacity to compile time; no allocator required for the core memory soup                       |
-| Build-time shape     | `BuildOptions` from `build.zig` options                                                                           | Recompiles when memory layout changes; keeps runtime config focused on evolutionary behavior                         |
+| Build-time shape     | `BuildOptions` from `src/config.zon` imported with `@import`                                                      | Recompiles when memory layout changes; keeps runtime config focused on evolutionary behavior                         |
 | Creature storage     | ArrayList + free list                                                                                             | O(1) access by ID; IDs are indices                                                                                   |
 | Queue implementation | Intrusive doubly-linked list                                                                                      | O(1) insert/remove/reorder for slicer and reaper                                                                     |
 | RNG                  | `std.Random.Xoshiro256`                                                                                           | Fast, good statistical properties, seedable                                                                          |
 | Display binding      | `@cImport` + `pub usingnamespace` re-export, thin `err()`/default wrappers, `linkSystemLibrary("notcurses-core")` | Zero-cost FFI; single wrapper module re-exports all C symbols with Zig-friendly error conversion and struct defaults |
-| Runtime config       | `.zon` file parsed by `std.zon.fromSlice` at startup                                                              | Zig-native format; struct defaults enable partial behavior config while fixed storage remains compile-time           |
+| Runtime config       | Optional runtime-only `.zon` file parsed by `std.zon.fromSlice` at startup                                        | Zig-native format; struct defaults enable partial behavior config while fixed storage remains compile-time           |
 | Lineage tracking     | Append-only JSONL event log, background thread flush                                                              | Streamable, greppable, reconstructable into phylogenetic trees; async avoids simulation stalls                       |
 | Snapshot interval    | Configurable via `RuntimeConfig.snapshot_interval`                                                                | Lets user trade disk space for temporal resolution                                                                   |
 | Error handling       | Zig error unions                                                                                                  | Natural fit; CPU faults map to error returns                                                                         |
