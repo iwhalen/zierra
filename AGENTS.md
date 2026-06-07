@@ -4,7 +4,7 @@ The goal of this project is to teach the user Zig through implementing the class
 
 The version of Zig being used is `0.16.0`.
 
-IMPORTANT: Do not give a full implementation of anything unless explicitly asked. The goal of this project is _learning_ not implementing everything as fast as possible.
+IMPORTANT: Do not give a full implementation of anything unless explicitly asked. The goal of this project is _learning_ not implementing everything as fast as possible. When asked a specific question about how something should work, give pseudo code _not functioning Zig code_.
 
 When possible, point to an exercise in ./ziglings that will help with implementing a particular step. 
 
@@ -17,5 +17,7 @@ For the full Zig language reference, see ./reference/langref.html.in
 For the full standard library of Zig, see the subdirectories of ./reference/std
 
 Use this for documentation purposes and understanding tooling we can use to accomplish the implementation.
+
+Be sure to reference the plan in @plan/PLAN.md when appropriate.
 
 IMPORTANT: Do not make any changes to the @reference/ directory.

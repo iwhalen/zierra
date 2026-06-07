@@ -19,13 +19,12 @@ runtime state. In practice:
   rather than heap-allocating the arena on startup.
 - Zig will still initialize mutable soup contents when the simulation starts; the compile-time win is
   that capacity, storage layout, address assumptions, and bounds are known to the compiler.
-- Runtime configuration may still override evolutionary parameters such as mutation rates and RNG seed
-  if loaded from a runtime file, but it must not change the memory layout of an already-compiled
-  simulation binary. Values imported from `src/config.zon` are compile-time constants.
+- Configuration comes from one `Config` object imported from `src/config.zon`. Fields that define
+  storage shape and fields that tune evolutionary behavior live together in that object.
 - The main simulation remains runtime behavior: creature birth/death, allocation occupancy, mutations,
   scheduling, genebank growth, lineage output, and display state are all data that evolves while running.
 - Prefer factory functions like `Soup(comptime size: u16) type` and
-  `Simulation(comptime opts: BuildOptions) type` when a module's storage or dispatch can be specialized.
+  `Simulation(comptime config: Config) type` when a module's storage or dispatch can be specialized.
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -63,318 +62,41 @@ runtime state. In practice:
 
 ---
 
-## Module Breakdown
+## Linear Implementation Plan
 
-### 1. Instruction Set (`src/core/instruction.zig`)
-
-The atomic unit of Tierra. The paper defines 32 instructions, so the logical instruction code is
-5 bits. For closeness to the original implementation, the soup still stores one instruction per byte,
-matching the paper's description of a 60,000 byte soup holding 60,000 Tierran instructions and the
-Appendix B pseudo-C that fetches an instruction into a `char`.
-
-**Contents:**
-
-- [x] `Instruction` enum with all 32 instructions (nop_0, nop_1, or1, shl, zero, if_cz, sub_ab, sub_ac, inc_a, inc_b, dec_c, inc_c, push_ax..push_dx, pop_ax..pop_dx, jmp, jmpb, call, ret, mov_cd, mov_ab, mov_iab, adr, adrb, adrf, mal, divide)
-- [x] `decode(raw: u8) Instruction` — mask/truncate to the low 5 bits and convert to an instruction
-- [x] `encode(instruction: Instruction) u8` — convert an instruction to its byte storage form (`0x00..0x1f`)
-- [x] (Skipped - can be handled in a switch statement) `isNop(instruction: Instruction) bool` — check if instruction is a template component
-- [x] (Skipped - compliment is for instruction sequences, not a single instruction) `complement(instruction: Instruction) Instruction` — nop_0 ↔ nop_1
-- [x] (Skipped - not needed, can loop over enums in Zig) `pub const all_instructions: [32]Instruction` — comptime table for exhaustive tests and dispatch validation
-- [x] (Skipped - not needed yet) `pub const metadata: [32]InstructionInfo` — comptime table for names, hard-instruction flag, and execution category
-
-**Storage rule from Tierra:**
-
-- Treat each soup cell as one byte of storage, not as a packed 5-bit bitstream.
-- Only the low 5 bits are genetic instruction data.
-- The upper 3 bits are padding for storage convenience and should not participate in decode, mutation,
-  genotype comparison, or copy-error mutation.
-
-**Tests:**
-
-- Sanity checks for decoding and encoding.
-- Decode ignores upper 3 storage bits
+Each phase should produce a testable, runnable artifact. Work through the sections in order; everything
+needed for a phase is grouped under that phase header.
 
 ---
 
-### 2. Soup / Memory (`src/core/soup.zig`)
+### Phase 1: Compile-Time Shape
 
-The contiguous memory arena that holds all creature code.
+Goal: establish the fixed simulation shape, byte-addressed instruction storage, and the basic CPU state.
 
-**Contents:**
+#### Configuration (`src/config.zon`, `src/core/config.zig`)
 
-- `pub fn Soup(comptime size: u16) type` — returns a fixed-capacity soup type
-- Specialized `Soup(size)` struct:
-  - `memory: [size]u8` — the soup itself (one byte per Tierran instruction)
-  - `owner: [size]?CreatureId` — per-cell write-ownership (null = free)
-  - `pub const capacity: u16 = size`
-- `init() Soup(size)` — initializes arrays in-place, no allocator needed
-- `deinit()`
-- `read(addr: usize) u8` — unrestricted read (wraps around)
-- `write(addr: usize, val: u8, writer_id: CreatureId) !void` — write only if writer owns this cell
-- `allocate(size: usize) ?Allocation` — find contiguous free block, mark ownership
-- `deallocate(alloc: Allocation)` — release ownership
-- `freeMemory() u16` — count of unowned cells
-- `inoculate(code: []const u8, addr: usize) CreatureId` — seed the initial ancestor
-
-The byte-per-cell representation is intentional. Tierra describes the default soup as about 60,000
-bytes holding the same number of machine instructions, while separately describing the instruction
-language as 32 instructions representable by 5 bits. Zierra should mirror that: byte-addressed cells,
-5 meaningful bits per cell.
-
-**Comptime constraints:**
-
-- `size` must fit in `u16` and should default to `60000`.
-- Compile-time assertions reject `size == 0` and values larger than `std.math.maxInt(u16)`.
-- Runtime `.zon` config does not change `size`; changing `src/config.zon` and rebuilding specializes a
-  new binary.
-
-**Tests:**
-
-- Allocation/deallocation round-trip
-- Write permission enforcement (write to unowned cell fails)
-- Free memory accounting
-- Wrap-around reads
-- Read/write preserve byte-addressed one-cell-per-instruction behavior
-- Inoculation of ancestor
-
----
-
-### 3. Virtual CPU (`src/core/cpu.zig`)
-
-Each creature has its own CPU context. This module defines the CPU state and the execution logic.
+Configuration is one project-wide object imported from `src/config.zon`. Values that affect type
+layout and values that tune evolutionary behavior are kept together so the simulation has one source of
+truth.
 
 **Contents:**
 
-- `pub fn Cpu(comptime opts: CpuOptions) type` — returns a CPU type specialized for stack depth and template search limit
-- Specialized `Cpu(opts)` struct:
-  - `ax, bx: u16` — address registers
-  - `cx, dx: u16` — numeric registers
-  - `fl: Flags` — error flags
-  - `sp: StackIndex` — stack pointer sized from `opts.stack_depth`
-  - `stack: [opts.stack_depth]u16` — default Tierra stack depth is 10
-  - `ip: u16` — instruction pointer
-- `init(ip: u16) Cpu`
-- `push(val: u16) !void` — push onto stack (error on overflow)
-- `pop() !u16` — pop from stack (error on underflow)
-- `execute(cpu: *Cpu, instruction: Instruction, soup: *Soup, creature: *Creature) !void` — execute one instruction
-  - Dispatches to per-instruction handlers
-  - Template search logic for jmp/jmpb/call/adr/adrb/adrf
-- `step(cpu: *Cpu, soup: *Soup, creature: *Creature) !void` — fetch + decode + execute + advance IP
-
-**Template Search (`src/core/template.zig`):**
-
-- `pub fn TemplateSearch(comptime soup_size: u16, comptime search_limit: u16) type`
-- `searchForward(soup, start, limit) ?u16`
-- `searchBackward(soup, start, limit) ?u16`
-- `searchBidirectional(soup, start, limit) ?u16`
-- Extracts the NOP pattern following `start`, finds complementary pattern
-
-When the limit is fixed at compile time, loops can be bounded with comptime-known constants. A runtime
-limit can still be passed for tests or experiments, but the production simulation should use the
-compiled limit.
-
-**Tests:**
-
-- Each instruction in isolation (zero, or1, shl, inc/dec, sub, push/pop, mov, if_cz)
-- Stack overflow/underflow
-- Template search: forward, backward, bidirectional, not-found
-- Full step cycle (fetch → decode → execute → IP advance)
-
----
-
-### 4. Creature (`src/core/creature.zig`)
-
-Represents a living organism in the soup.
-
-**Contents:**
-
-- `CreatureId` — unique identifier (index or generation counter)
-- `Creature` struct:
-  - `id: CreatureId`
-  - `cpu: Cpu`
-  - `mother_alloc: Allocation` — memory block for own code
-  - `daughter_alloc: ?Allocation` — memory block for daughter (set by `mal`)
-  - `errors: u32` — accumulated error count
-  - `instructions_executed: u64`
-  - `instructions_copied: u64` — count of mov_iab executions
-  - `parent_genotype: ?GenotypeId`
-  - `origin_time: u64` — inst_exec_c at birth
-- `init(id, alloc, ip, parent) Creature`
-
-**Tests:**
-
-- Construction and field defaults
-- Error accumulation
-
----
-
-### 5. Creature Manager / Scheduler (`src/sim/scheduler.zig`)
-
-Manages the slicer queue, reaper queue, and the main simulation loop.
-
-**Slicer (circular queue):**
-
-- `SlicerQueue` struct — doubly-linked circular list of creatures
-- `insert(creature, after)` — insert just ahead of `after`
-- `next() *Creature` — advance to next creature
-- `remove(creature)` — remove from queue
-- `sliceSize(genome_size, slicer_power) u16` — compute time slice
-
-**Reaper (linear queue):**
-
-- `ReaperQueue` struct — doubly-linked list
-- `addToBottom(creature)` — newborns go to bottom
-- `killTop() CreatureId` — reap the top creature
-- `moveUp(creature)` — on error, move toward top (with constraint)
-- `moveDown(creature)` — on success of hard instructions, move toward bottom
-
-**Tests:**
-
-- Slicer round-robin ordering
-- Slicer insertion order (daughter before mother)
-- Slice size calculation with different powers
-- Reaper kill order (FIFO with modifications)
-- Reaper movement (up on error, down on success, constraints)
-- Integration: creatures added/removed from both queues simultaneously
-
----
-
-### 6. Mutation Engine (`src/sim/mutation.zig`)
-
-Handles cosmic ray mutations, copy errors, and execution flaws.
-
-**Contents:**
-
-- `MutationConfig` struct:
-  - `cosmic_rate: u32` — instructions between background mutations
-  - `copy_error_rate: u32` — instructions copied between copy mutations
-  - `flaw_rate: u32` — execution flaw probability
-  - RNG state
-- `cosmicRay(soup: *Soup)` — flip one random genetic bit at a random instruction location
-- `maybeCopyError(instruction: u8) u8` — possibly flip one low-5-bit genetic bit during mov_iab
-- `maybeFlawResult(value: u16) u16` — possibly return value ± 1
-- Uses Zig's `std.Random` (Xoshiro256 or similar) seeded at startup
-
-**Tests:**
-
-- Cosmic ray actually modifies one bit
-- Cosmic ray only flips bit positions `0..4` of a soup byte
-- Copy error rate distribution (statistical test over many calls)
-- Copy errors only flip bit positions `0..4` and return canonical `0x00..0x1f` instruction bytes
-- Flaw magnitude is ±1 only
-- Deterministic tests with fixed seed
-
----
-
-### 7. Genebank & Statistics (`src/sim/genebank.zig`)
-
-Records genotypes and tracks simulation metrics.
-
-**Contents:**
-
-- `GenotypeId` — size + 3-letter code (e.g., `0080aaa`)
-- `GenotypeRecord` struct:
-  - Name, parent name
-  - Origin time
-  - Metabolic data (instructions in 1st/2nd replication, errors, copies)
-  - Environmental params at origin
-  - `breeds_true: bool`
-  - `max_prop_pop, max_prop_inst: f32`
-- `Genebank` struct:
-  - HashMap of GenotypeName → GenotypeRecord
-  - `register(genome: []const u8, parent: ?GenotypeId, metadata) GenotypeId`
-  - `lookup(id: GenotypeId) ?GenotypeRecord`
-  - `nameForSize(size: usize) GenotypeName` — generates next 3-letter code for size class
-- `Stats` struct:
-  - `inst_exec_c: u64` — global instruction counter (the Tierran clock)
-  - `population: u32`
-  - `free_memory: u16`
-  - Size-class histogram
-
-**Tests:**
-
-- Genotype naming convention (sequential letters per size)
-- Registration and lookup
-- Stats accumulation
-
----
-
-### 8. Simulation Engine (`src/sim/simulation.zig`)
-
-Ties everything together. Implements the main loop from the paper.
-
-**Contents:**
-
-- `pub fn Simulation(comptime opts: BuildOptions) type` — returns a simulation type with fixed storage shapes
-- Specialized `Simulation(opts)` struct:
-  - `soup: Soup(opts.soup_size)`
-  - `slicer: SlicerQueue`
-  - `reaper: ReaperQueue`
-  - `mutation: MutationEngine`
-  - `genebank: Genebank`
-  - `stats: Stats`
-  - `runtime_config: RuntimeConfig` — mutation rates, RNG seed, snapshot intervals, output paths
-- `init(runtime_config) Simulation(opts)`
-- `inoculate(ancestor_code: []const u8)` — seed the first creature
-- `tick()` — one slicer cycle:
-  1. Execute time_slice instructions for current creature
-  2. Advance slicer
-  3. While free memory < threshold: reap
-  4. Maybe apply cosmic ray
-  5. Update stats
-- `run(max_instructions: u64)` — main loop calling tick()
-
-**Ancestor genome** (`src/sim/ancestor.zig`):
-
-- The 80-instruction self-replicating program (0080aaa) encoded as a `[80]u8`
-- Compile-time validation asserts every byte decodes to a known instruction and the genome fits in
-  `opts.soup_size`
-
-**Tests:**
-
-- Inoculation creates one creature with correct genome
-- Ancestor self-replicates (run until population = 2)
-- Reaper triggers when memory fills
-- Integration test: run for N instructions, verify population > 1
-
----
-
-### 9. Configuration (`src/core/config.zig`)
-
-Configuration is split into compile-time options imported from `src/config.zon` and optional runtime
-evolutionary settings. The split is intentional: values that affect type layout, array sizes, or
-compiled-in features live in `src/config.zon`; values that only affect simulation behavior may also be
-loaded from a runtime `.zon` file later.
-
-**Contents:**
-
-- `BuildOptions` struct — comptime parameters populated from `src/config.zon`, with defaults matching
-  original Tierra paper values:
+- [x] `Config` struct populated from `src/config.zon`:
   - `soup_size: u16 = 60000`
   - `stack_depth: u8 = 10`
-  - `search_limit: u16 = 500` — template search max distance
+  - `search_limit: u16 = 500`
   - `lineage_enabled: bool = true`
   - `display_enabled: bool = true`
-- `RuntimeConfig` struct — behavior parameters. The default values are also present in `src/config.zon`;
-  a separate runtime file may override only runtime-safe fields:
-  - `reaper_threshold: f32 = 0.8` — reap when memory usage exceeds this fraction
-  - `cosmic_rate: u32 = 10000` — instructions between background mutations
-  - `copy_error_rate: u32 = 1000` — instructions copied between copy mutations
-  - `flaw_rate: f32 = 1.5` — flaw-rate multiplier applied to copy-error rate
-  - `slicer_power: f32 = 1.0` — exponent for time-slice calculation
-  - `snapshot_interval: u64 = 100000` — instructions between snapshots (0 = disabled)
-  - `output_dir: []const u8 = "output"` — base directory for all output
-  - `rng_seed: u64 = 8675309` — deterministic seed
-- `loadRuntimeFromFile(allocator: Allocator, path: []const u8) !RuntimeConfig` — optional later feature:
-  reads a runtime-only `.zon` file and parses it using `std.zon.fromSlice(RuntimeConfig, ...)`
-- `validateBuildOptions(comptime opts: BuildOptions) void` — uses `@compileError` for impossible layouts
-- `pub const build_options = BuildOptions{ ... }` — created from `@import("../config.zon")`
-- `pub const default_runtime_config = RuntimeConfig{ ... }` — created from `@import("../config.zon")`
-- Since runtime fields have defaults, a partial runtime `.zon` file works — only override what you need
-- CLI: `--config path/to/runtime.zon`; individual CLI flags override runtime-safe config values only
-- Build-shape changes: edit `src/config.zon`, then rebuild
+  - `reaper_threshold: f32 = 0.8`
+  - `cosmic_rate: u32 = 10000`
+  - `copy_error_rate: u32 = 1000`
+  - `flaw_rate: f32 = 1.5`
+  - `slicer_power: f32 = 1.0`
+  - `snapshot_interval: u64 = 100000`
+  - `output_dir: []const u8 = "output"`
+  - `rng_seed: u64 = 8675309`
 
-**Example config file (`src/config.zon`):**
+**Example `src/config.zon`:**
 
 ```zon
 .{
@@ -395,19 +117,351 @@ loaded from a runtime `.zon` file later.
 
 **Tests:**
 
-- Parse `.zon` with all fields specified
-- Parse partial `.zon` (defaults fill in unspecified fields)
-- Invalid `.zon` returns error
-- Default compile-time/runtime config matches original Tierra paper values
-- Compile-time validation rejects invalid soup size, stack depth, and template limit
+- Default config matches original Tierra paper values
+- Config validation rejects invalid soup size, stack depth, and template limit
+
+#### Instruction Set (`src/core/instruction.zig`)
+
+The atomic unit of Tierra. The paper defines 32 instructions, so the logical instruction code is 5
+bits. The soup still stores one instruction per byte, matching the paper's 60,000 byte soup holding
+60,000 Tierran instructions.
+
+**Contents:**
+
+- [x] `Instruction` enum with all 32 instructions
+- [x] `decode(raw: u8) Instruction` — mask/truncate to the low 5 bits
+- [x] `encode(instruction: Instruction) u8` — returns `0x00..0x1f`
+- [x] Use switches or enum iteration where helpful instead of premature metadata tables
+
+**Storage rule from Tierra:**
+
+- Treat each soup cell as one byte of storage, not as a packed 5-bit bitstream.
+- Only the low 5 bits are genetic instruction data.
+- The upper 3 bits are padding and should not participate in decode, mutation, genotype comparison, or
+  copy-error mutation.
+
+**Tests:**
+
+- [x] Sanity checks for decoding and encoding
+- [x] Decode ignores upper 3 storage bits
+
+#### Soup / Memory (`src/core/soup.zig`)
+
+The contiguous memory arena that holds all creature code.
+
+**Contents:**
+
+- [x] `pub fn Soup(comptime size: u16) type`
+- [x] Specialized `Soup(size)` struct:
+  - `memory: [size]u8`
+  - `owner: [size]?CreatureId`
+- [x] `read(addr: usize) u8`
+- [x] `write(addr: usize, val: u8, writer_id: CreatureId) !void`
+- [x] `allocate(size: usize) ?Allocation`
+- [x] `free(alloc: Allocation)`
+- [x] `count_free_memory() u16`
+- [x] `inoculate(code: []const u8, addr: u16, owner: CreatureId) !Allocation`
+
+**Comptime constraints:**
+
+- [x] `size` must fit in `u16` and default to `60000`.
+- [x] Compile-time assertions reject `size == 0` and values larger than `std.math.maxInt(u16)`.
+- [x]Changing `src/config.zon` and rebuilding specializes a new binary.
+
+**Tests:**
+
+- [x] Allocation/deallocation round-trip
+- [x] Write permission enforcement
+- [x] Free memory accounting
+- [x] Wrap-around reads (not doing a circular soup right now).
+- [x] One-byte-per-instruction behavior
+- [x] Inoculation of ancestor
+
+#### CPU State (`src/core/cpu.zig`)
+
+Each creature has its own CPU context. In this phase, implement CPU shape and stack/register helpers
+without full instruction execution.
+
+**Contents:**
+
+- `pub fn Cpu(comptime opts: Config) type`
+- Specialized `Cpu(opts)` struct:
+  - `ax, bx: u16`
+  - `cx, dx: u16`
+  - `fl: u8`
+  - `sp: u8`
+  - `stack: [opts.stack_depth]u16`
+  - `ip: u16`
+- `init(ip: u16) Cpu`
+- `push(val: u16) !void`
+- `pop() !u16`
+
+This mirrors the original Tierra CPU register struct:
+
+```c
+struct cpu {  /* structure for registers of virtual cpu */
+    int   ax;      /* address register */
+    int   bx;      /* address register */
+    int   cx;      /* numerical register */
+    int   dx;      /* numerical register */
+    char  fl;      /* flag */
+    char  sp;      /* stack pointer */
+    int   st[10];  /* stack */
+    int   ip;      /* instruction pointer */
+};
+```
+
+**Stack behavior pseudo code:**
+
+```text
+push(value):
+    if sp == stack_depth:
+        fl = 1
+        return StackOverflow
+
+    stack[sp] = value
+    sp += 1
+    fl = 0
+
+pop():
+    if sp == 0:
+        fl = 1
+        return StackUnderflow
+
+    sp -= 1
+    fl = 0
+    return stack[sp]
+```
+
+**Tests:**
+
+- [x] Construction and defaults (initializers used, no constructor needed)
+- [x] Stack overflow/underflow
+
+Useful Ziglings: exercises on `enum`, `struct`, `array`, `error_union`, and `comptime`.
 
 ---
 
-### 10. Persistence & Lineage (`src/persistence/`)
+### Phase 2: Execution Engine
 
-First-class serialization and lineage tracking. All output goes to `output/<run_id>/`.
+Goal: make one creature's CPU fetch, decode, execute, and advance through soup memory.
 
-#### 10a. Lineage Tracking (`src/persistence/lineage.zig`)
+#### Template Search (`src/core/template.zig`)
+
+**Contents:**
+
+- `pub fn TemplateSearch(comptime soup_size: u16, comptime search_limit: u16) type`
+- `searchForward(soup, start, limit) ?u16`
+- `searchBackward(soup, start, limit) ?u16`
+- `searchBidirectional(soup, start, limit) ?u16`
+- Extract the NOP pattern following `start`, then find the complementary pattern
+
+When the limit is fixed at compile time, loops can be bounded with comptime-known constants. Runtime
+limits may still be useful for tests or experiments.
+
+**Tests:**
+
+- Forward, backward, and bidirectional search
+- Not-found behavior
+- Template extraction at wrap-around boundaries
+
+#### CPU Execution (`src/core/cpu.zig`)
+
+**Contents:**
+
+- `execute(cpu: *Cpu, instruction: Instruction, soup: *Soup, creature: *Creature) !ExecAction`
+- `step(cpu: *Cpu, soup: *Soup, creature: *Creature) !ExecAction`
+- Implement all 32 instruction handlers:
+  - arithmetic/register ops
+  - stack ops
+  - control flow and template-addressing ops
+  - memory/copy ops
+  - lifecycle signaling ops (`mal`, `divide`)
+- Return `ExecAction` for side effects that belong to the simulation layer:
+  - `none`
+  - `divide`
+  - `mal_request`
+  - `error_condition`
+  - `hard_instruction_success`
+
+**Tests:**
+
+- Each instruction in isolation
+- Full step cycle: fetch, decode, execute, advance IP
+- Error flag behavior
+- `ExecAction` behavior for `mal` and `divide`
+
+#### Creature (`src/core/creature.zig`)
+
+Represents a living organism in the soup.
+
+**Contents:**
+
+- `CreatureId`
+- `Creature` struct:
+  - `id: CreatureId`
+  - `cpu: Cpu`
+  - `mother_alloc: Allocation`
+  - `daughter_alloc: ?Allocation`
+  - `errors: u32`
+  - `instructions_executed: u64`
+  - `instructions_copied: u64`
+  - `parent_genotype: ?GenotypeId`
+  - `origin_time: u64`
+- `init(id, alloc, ip, parent) Creature`
+
+**Tests:**
+
+- Construction and field defaults
+- Error accumulation
+
+Useful Ziglings: exercises on tagged unions, switches, optionals, pointers, and error handling.
+
+---
+
+### Phase 3: Lifecycle Management
+
+Goal: run a minimal Tierra loop with creatures, queues, allocation, division, and reaping.
+
+#### Scheduler (`src/sim/scheduler.zig`)
+
+Manages the slicer queue, reaper queue, and the main simulation loop's creature ordering.
+
+**Slicer contents:**
+
+- `SlicerQueue` — doubly-linked circular list of creatures
+- `insert(creature, after)`
+- `next() *Creature`
+- `remove(creature)`
+- `sliceSize(genome_size, slicer_power) u16`
+
+**Reaper contents:**
+
+- `ReaperQueue` — doubly-linked list
+- `addToBottom(creature)`
+- `killTop() CreatureId`
+- `moveUp(creature)`
+- `moveDown(creature)`
+
+**Tests:**
+
+- Slicer round-robin ordering
+- Daughter-before-mother insertion order
+- Slice size calculation with different powers
+- Reaper kill order
+- Reaper movement constraints
+- Creatures added/removed from both queues simultaneously
+
+#### Ancestor Genome (`src/sim/ancestor.zig`)
+
+**Contents:**
+
+- The 80-instruction self-replicating program (`0080aaa`) encoded as `[80]u8`
+- Compile-time validation that every byte decodes to a known instruction
+- Compile-time validation that the genome fits in `config.soup_size`
+
+**Tests:**
+
+- Ancestor bytes decode successfully
+- Ancestor length matches expected genome size
+
+#### Simulation Engine (`src/sim/simulation.zig`)
+
+Ties together soup, CPU, creatures, scheduler queues, and the main loop.
+
+**Contents:**
+
+- `pub fn Simulation(comptime config: Config) type`
+- Specialized `Simulation(config)` struct:
+  - `soup: Soup(config.soup_size)`
+  - `slicer: SlicerQueue`
+  - `reaper: ReaperQueue`
+  - `stats: Stats`
+- `config: Config`
+- `init() Simulation(config)`
+- `inoculate(ancestor_code: []const u8) !CreatureId`
+- `tick()`:
+  1. Execute the current creature's time slice
+  2. Handle `ExecAction` values from CPU steps
+  3. Advance slicer
+  4. Reap while free memory is below threshold
+  5. Update stats
+- `run(max_instructions: u64)`
+
+**Tests:**
+
+- Inoculation creates one creature with correct genome
+- Ancestor self-replicates far enough to create a second creature
+- Reaper triggers when memory fills
+- Integration test: run for N instructions and verify population changes
+
+Useful Ziglings: exercises on linked lists or pointer-like data structures, allocator-backed containers,
+and testing.
+
+---
+
+### Phase 4: Evolution & Lineage
+
+Goal: add mutation, genotype tracking, statistics, and birth/death/replication event recording.
+
+#### Mutation Engine (`src/sim/mutation.zig`)
+
+**Contents:**
+
+- `MutationConfig`:
+  - `cosmic_rate: u32`
+  - `copy_error_rate: u32`
+  - `flaw_rate: u32`
+  - RNG state
+- `cosmicRay(soup: *Soup)`
+- `maybeCopyError(instruction: u8) u8`
+- `maybeFlawResult(value: u16) u16`
+- Use Zig's `std.Random` with deterministic startup seed
+
+**Integration points:**
+
+- Background mutation from the main loop every `cosmic_rate` instructions
+- Copy error in the `mov_iab` execution path
+- Execution flaw in arithmetic/bit-flip instruction handlers
+
+**Tests:**
+
+- Cosmic ray modifies exactly one low-5-bit position
+- Copy errors only flip bit positions `0..4`
+- Copy errors return canonical `0x00..0x1f` instruction bytes
+- Flaw magnitude is only +/- 1
+- Deterministic tests with fixed seed
+
+#### Genebank & Statistics (`src/sim/genebank.zig`)
+
+**Contents:**
+
+- `GenotypeId` — size + 3-letter code, e.g. `0080aaa`
+- `GenotypeRecord`:
+  - name and parent name
+  - origin time
+  - metabolic data
+  - environmental params at origin
+  - `breeds_true: bool`
+  - `max_prop_pop, max_prop_inst: f32`
+- `Genebank`:
+  - genotype hash map
+  - `register(genome: []const u8, parent: ?GenotypeId, metadata) GenotypeId`
+  - `lookup(id: GenotypeId) ?GenotypeRecord`
+  - `nameForSize(size: usize) GenotypeName`
+- `Stats`:
+  - `inst_exec_c: u64`
+  - `population: u32`
+  - `free_memory: u16`
+  - size-class histogram
+
+**Tests:**
+
+- Genotype naming convention
+- Registration and lookup
+- Stats accumulation
+
+#### Lineage Tracking (`src/persistence/lineage.zig`)
 
 Records every organism birth, death, and first replication as an append-only JSONL event log.
 
@@ -415,60 +469,95 @@ Records every organism birth, death, and first replication as an append-only JSO
 
 - `LineageEvent` tagged union:
   - `.birth { parent_id: ?CreatureId, child_id: CreatureId, genotype_id: GenotypeId, time: u64 }`
-  - `.death { creature_id: CreatureId, time: u64, cause: DeathCause }` — cause: reaped, error_limit, etc.
-  - `.first_replication { creature_id: CreatureId, genotype_id: GenotypeId, time: u64 }` — marks breeds-true
+  - `.death { creature_id: CreatureId, time: u64, cause: DeathCause }`
+  - `.first_replication { creature_id: CreatureId, genotype_id: GenotypeId, time: u64 }`
 - `DeathCause` enum: `reaped`, `error_limit`
-- `LineageWriter` struct:
-  - Buffers events in a ring buffer
-  - Background thread flushes to `output/<run_id>/lineage.jsonl`
-  - `record(event: LineageEvent)` — non-blocking, called from simulation hot path
-  - `flush()` / `deinit()` — drain buffer and close file
-- Each line is one JSON object, enabling `grep`, `jq`, streaming analysis
-- Full phylogenetic tree can be reconstructed offline from the log
+- `LineageWriter`:
+  - ring buffer of events
+  - background thread flushing to `output/<run_id>/lineage.jsonl`
+  - `record(event: LineageEvent)`
+  - `flush()` / `deinit()`
 
-#### 10b. Periodic Snapshots (`src/persistence/snapshot.zig`)
+**Integration points:**
 
-Writes simulation summary at regular intervals for time-series analysis.
+- Creature birth from `divide`
+- Creature death from reaper/error paths
+- First replication and breeds-true updates
 
-**Contents:**
+**Tests:**
 
-- `SnapshotWriter` struct:
-  - Configurable interval from `RuntimeConfig.snapshot_interval`
-  - Writes to `output/<run_id>/snapshots/<inst_count>.json`
-  - Each snapshot captures: population count, genotype census (size-class histogram), top genotypes by population, free memory, instruction counter
-  - Background thread: simulation copies snapshot data into a channel, writer thread serializes to disk
-- `takeSnapshot(sim: *const Simulation) SnapshotData` — capture current state (fast, lock-free read)
+- Event serialization round-trip
+- JSONL formatting correctness
+- Simulation run writes birth/death events with correct parent-child relationships
 
-#### 10c. Save/Load State (`src/persistence/state.zig`)
-
-Full simulation serialization for pause/resume.
-
-**Contents:**
-
-- `save(sim: *const Simulation, path: []const u8) !void` — serialize entire simulation state
-- `load(allocator: Allocator, path: []const u8) !Simulation` — deserialize and reconstruct
-- Uses `std.json.stringify` for output, `std.json.parseFromSlice` for loading (JSON chosen over ZON for state files since they may be large and benefit from streaming)
-
-**Tests (all persistence):**
-
-- Lineage: event serialization round-trip, JSONL formatting correctness
-- Lineage integration: run simulation, verify log contains birth/death events with correct parent→child relationships
-- Snapshots: run for N instructions, verify files written at expected intervals
-- Save/load: save simulation, load into new instance, verify state matches
+Useful Ziglings: exercises on random numbers, tagged unions, JSON/string formatting, and allocators.
 
 ---
 
-### 11. Display Layer (`src/display/`)
+### Phase 5: Snapshots & Persistence
 
-Wraps notcurses via a thin Zig binding module, following idiomatic patterns for C interop.
+Goal: make simulation state observable over time and resumable.
 
-#### 11a. Notcurses Wrapper (`src/display/notcurses.zig`)
-
-A thin binding module that re-exports all notcurses C symbols and adds Zig-friendly helpers.
+#### Periodic Snapshots (`src/persistence/snapshot.zig`)
 
 **Contents:**
 
-- `@cImport` + `pub usingnamespace` — imports all C symbols and re-exports them so callers use a single namespace:
+- `SnapshotWriter`
+  - interval from `config.snapshot_interval`
+  - writes to `output/<run_id>/snapshots/<inst_count>.json`
+  - captures population, genotype census, top genotypes, free memory, and instruction counter
+  - background writer thread
+- `takeSnapshot(sim: *const Simulation) SnapshotData`
+
+**Tests:**
+
+- Run for N instructions and verify files are written at expected intervals
+- Snapshot data matches simulation state
+
+#### Save/Load State (`src/persistence/state.zig`)
+
+**Contents:**
+
+- `save(sim: *const Simulation, path: []const u8) !void`
+- `load(allocator: Allocator, path: []const u8) !Simulation`
+- Use `std.json.stringify` for output and `std.json.parseFromSlice` for loading
+
+**Tests:**
+
+- Save simulation, load into a new instance, verify state matches
+- Continue running after load
+
+Useful Ziglings: exercises on file I/O, JSON, allocators, and error cleanup.
+
+---
+
+### Phase 6: Visualization
+
+Goal: add an optional notcurses display without changing the simulation core.
+
+#### Build Configuration (`build.zig`)
+
+The basic build/test/run wiring can stay minimal until the display layer needs C interop.
+
+**Contents:**
+
+- Link notcurses-core as a system library and link libc:
+  ```zig
+  exe.linkSystemLibrary("notcurses-core");
+  exe.linkLibC();
+  ```
+- Add a display integration test step:
+  - `zig build test-integration` — run tests that require notcurses installed
+- Keep normal commands available:
+  - `zig build`
+  - `zig build run`
+  - `zig build test`
+
+#### Notcurses Wrapper (`src/display/notcurses.zig`)
+
+**Contents:**
+
+- `@cImport` + `pub usingnamespace` re-export:
   ```zig
   const c = @cImport({
       @cDefine("_XOPEN_SOURCE", "700");
@@ -476,92 +565,65 @@ A thin binding module that re-exports all notcurses C symbols and adds Zig-frien
   });
   pub usingnamespace c;
   ```
-- Default struct initializers — C structs from `@cImport` lack Zig defaults, so provide factory functions:
-  ```zig
-  pub fn notcurses_options_default() c.notcurses_options {
-      return .{
-          .termtype = null,
-          .loglevel = 0,
-          .margin_t = 0, .margin_r = 0, .margin_b = 0, .margin_l = 0,
-          .flags = c.NCOPTION_SUPPRESS_BANNERS,
-      };
-  }
-  ```
-- Error conversion helper — wraps negative C return codes into Zig errors:
-  ```zig
-  pub fn err(code: c_int) !void {
-      if (code < 0) return error.NotcursesError;
-  }
-  ```
+- Default C struct initializer helpers
+- `err(code: c_int) !void` for negative C return codes
 
-#### 11b. Display Orchestration (`src/display/display.zig`)
-
-Uses the wrapper module idiomatically for init/teardown and rendering.
+#### Display Orchestration (`src/display/display.zig`)
 
 **Contents:**
 
-- `const nc = @import("notcurses.zig");`
 - `Display` struct:
   - `ctx: *nc.notcurses`
   - `stdplane: *nc.ncplane`
-  - Dedicated planes for each view
-- `init() !Display` — uses `orelse` for nullable pointer handling:
-  ```zig
-  var opts = nc.notcurses_options_default();
-  const ctx = nc.notcurses_core_init(&opts, null) orelse return error.InitFailed;
-  const stdplane = nc.notcurses_stdplane(ctx) orelse return error.StdplaneFailed;
-  ```
-- `deinit()` — `try nc.err(nc.notcurses_stop(self.ctx));`
-- `render(sim: *const Simulation)` — draw current state via `try nc.err(nc.notcurses_render(self.ctx));`
-- `pollInput() ?InputEvent` — non-blocking input check
+  - dedicated planes for each view
+- `init() !Display`
+- `deinit()`
+- `render(sim: *const Simulation)`
+- `pollInput() ?InputEvent`
 
-#### 11c. Views (separate source files under `src/display/`)
+#### Views (`src/display/`)
 
-- `soup_view.zig` — color-coded map of the soup (each cell = one instruction, color = owner/instruction)
+**Contents:**
+
+- `soup_view.zig` — color-coded soup map
 - `stats_view.zig` — population, diversity, instruction count, free memory
-- `creature_view.zig` — detail panel for selected creature (registers, genome)
+- `creature_view.zig` — selected creature registers and genome
 - `size_histogram.zig` — size-class distribution bar chart
 
 **Tests:**
 
 - Display module compiles and links against notcurses
-- Init/deinit without crash (integration test)
-- View rendering functions produce expected plane contents (mock plane)
+- Init/deinit without crash
+- View rendering functions produce expected plane contents, preferably against a mock plane
+
+**Prerequisite:** the `notcurses-core` package must be installed on the system, for example
+`apt install libnotcurses-dev` or equivalent.
+
+Useful Ziglings: exercises on C interop, optionals, and error handling.
 
 ---
 
-### 12. Build Configuration (`build.zig`)
+### Phase 7: Polish
 
-- Build options specialize the simulation type:
-  ```zig
-  const soup_size = b.option(u16, "soup-size", "Number of cells in the soup") orelse 60000;
-  const search_limit = b.option(u16, "search-limit", "Template search distance") orelse 500;
-  const stack_depth = b.option(u8, "stack-depth", "CPU stack depth") orelse 10;
-  ```
-- Generate/import a small options module so source files can instantiate:
-  ```zig
-  const opts = @import("build_options");
-  const Sim = simulation.Simulation(.{
-      .soup_size = opts.soup_size,
-      .search_limit = opts.search_limit,
-      .stack_depth = opts.stack_depth,
-  });
-  ```
-- Link notcurses-core as a system library and link libc:
-  ```zig
-  exe.linkSystemLibrary("notcurses-core");
-  exe.linkLibC();
-  ```
-- **Prerequisite:** the `notcurses-core` package must be installed on the system (e.g., `apt install libnotcurses-dev` or equivalent)
-- Separate build steps:
-  - `zig build` — compile library + executable
-  - `zig build run` — run simulation
-  - `zig build test` — run all unit tests
-  - `zig build test-integration` — run integration tests (requires notcurses installed)
-- Common compile-time variants, made by editing `src/config.zon` and rebuilding:
-  - `.soup_size = 60000` — original Tierra-style layout
-  - `.soup_size = 120000` — larger soup, requires recompilation
-  - `.display_enabled = false` — headless binary
+Goal: make the simulation convenient to run and tune.
+
+#### CLI (`src/main.zig`)
+
+**Contents:**
+
+- Show the active config at startup
+- Headless/display selection based on `config.display_enabled`
+- Run length / max instruction argument
+- Output directory/run ID handling
+
+#### Performance
+
+**Contents:**
+
+- Profile the hot loop after correctness tests pass
+- Optimize soup allocation scans, queue updates, and instruction dispatch only where measurement shows a
+  real problem
+- Keep compile-time specialization for fixed storage shape and template limits
 
 ---
 
@@ -581,7 +643,7 @@ zierra/
 │   │   ├── cpu.zig              # CPU state, per-instruction execution
 │   │   ├── template.zig         # Template pattern search algorithms
 │   │   ├── creature.zig         # Creature struct and lifecycle
-│   │   └── config.zig           # BuildOptions, RuntimeConfig, config.zon import/runtime loading
+│   │   └── config.zig           # Config type and config.zon import
 │   ├── sim/
 │   │   ├── simulation.zig       # Top-level engine, main loop
 │   │   ├── scheduler.zig        # Slicer queue + Reaper queue
@@ -665,13 +727,17 @@ The CPU calls `soup.read(cpu.ip)` to fetch the current instruction, then `instru
 
 ```
 soup.allocate(size: u16) → ?Allocation    -- returns null if no contiguous block found
-soup.deallocate(alloc: Allocation) → void -- releases ownership of all cells in block
-soup.inoculate(code: []const u8, addr: u16, owner: CreatureId) → void
-    -- writes code into soup at addr, sets ownership; used only for initial seeding
+soup.free(alloc: Allocation) → void -- releases ownership of all cells in block
+soup.inoculate(code: []const u8, addr: u16, owner: CreatureId) → !Allocation
+    -- writes code into soup at addr, sets ownership for owner, and returns the seeded allocation
 ```
 
 `Allocation` is the handle stored by `Creature` in `mother_alloc` and `daughter_alloc`. The concrete
 soup type is `Soup(comptime size)`, so allocation scans operate over fixed-size arrays.
+
+`Soup.inoculate` does not create a creature id or register the creature with any queue. It is a low-level
+seeding helper used by `Simulation.inoculate`, which creates the initial creature, calls
+`soup.inoculate`, stores the returned `Allocation` on that creature, and enqueues it for scheduling.
 
 ### CPU → Template Search
 
@@ -686,7 +752,7 @@ template.searchBidirectional(soup: *const Soup, start: u16, limit: u16) → ?u16
 **Input contract:**
 
 - `start` points to the instruction *after* the addressing instruction (i.e., the first NOP of the template)
-- `limit` is the compiled `BuildOptions.search_limit` — max distance to search
+- `limit` is `config.search_limit` — max distance to search
 - The function reads NOPs starting at `start` to build the template pattern, then searches for the complement
 
 **Output contract:**
@@ -694,7 +760,7 @@ template.searchBidirectional(soup: *const Soup, start: u16, limit: u16) → ?u16
 - Returns the address of the instruction *after* the end of the matched complementary template (i.e., where execution should resume)
 - Returns `null` if no complementary template is found within `limit`
 
-**On null return**, the calling CPU instruction sets `cpu.fl.error = true` and the instruction is skipped (IP advances past the template NOPs).
+**On null return**, the calling CPU instruction sets `cpu.fl = 1` and the instruction is skipped (IP advances past the template NOPs).
 
 ### Creature → CPU (composition)
 
@@ -798,7 +864,8 @@ mutation.maybeFlawResult(val: u16) → u16
     -- disabled when flaw_rate == 0
 ```
 
-The mutation engine owns its own RNG state (seeded from `RuntimeConfig.rng_seed`). It never reads or modifies simulation state beyond the specific value passed in.
+The mutation engine owns its own RNG state, seeded from `config.rng_seed`. It never reads or modifies
+simulation state beyond the specific value passed in.
 
 ### Simulation → Genebank
 
@@ -871,7 +938,8 @@ const GenotypeCount = struct { id: GenotypeId, count: u32 };
 const SizeCount = struct { size: u16, count: u32 };
 ```
 
-The simulation calls `takeSnapshot()` every `RuntimeConfig.snapshot_interval` instructions and hands the `SnapshotData` to a background writer thread.
+The simulation calls `takeSnapshot()` every `config.snapshot_interval` instructions and hands the
+`SnapshotData` to a background writer thread.
 
 ### Simulation → Display
 
@@ -897,77 +965,24 @@ const InputEvent = union(enum) {
 
 ### Config → Everything
 
-`BuildOptions` is known at compile time and determines concrete types. It is derived from
-`src/config.zon` through `@import`. `RuntimeConfig` is created once at startup and passed by value or
-`*const` to modules that need behavior knobs:
+`Config` is known at compile time and determines both concrete storage types and behavior knobs. It is
+derived from `src/config.zon` through `@import`:
 
 ```
-const Sim = Simulation(build_options);
-Sim.init(runtime_config: RuntimeConfig) → Sim
-    -- Instantiates Soup(build_options.soup_size) with in-struct arrays
+const cfg = config.config;
+const Sim = Simulation(cfg);
+Sim.init() → Sim
+    -- Instantiates Soup(cfg.soup_size) with in-struct arrays
     -- Passes mutation rates to MutationEngine.init()
-    -- Specializes CPU/template search with build_options.search_limit
-    -- Passes runtime_config.slicer_power to SlicerQueue
-    -- Passes runtime_config.reaper_threshold for memory pressure check
-    -- Passes runtime_config.snapshot_interval to SnapshotWriter
-    -- Passes runtime_config.rng_seed to MutationEngine and any other RNG consumers
+    -- Specializes CPU/template search with cfg.search_limit
+    -- Passes cfg.slicer_power to SlicerQueue
+    -- Passes cfg.reaper_threshold for memory pressure check
+    -- Passes cfg.snapshot_interval to SnapshotWriter
+    -- Passes cfg.rng_seed to MutationEngine and any other RNG consumers
 ```
 
-No module modifies `RuntimeConfig` after startup. It is effectively immutable for the lifetime of the
-simulation.
-
----
-
-## Implementation Order
-
-Each phase produces a testable, runnable artifact.
-
-### Phase 1: Compile-Time Shape
-
-1. `config.zon` implemented.
-2. `build.zig` — normal build/test steps; no project-specific build flags for simulation shape
-3. `core/instruction.zig` — Instruction enum, encode/decode, complement, isNop, comptime instruction tables
-4. `core/soup.zig` — `Soup(comptime size)` with fixed arrays, read/write, allocate/deallocate
-5. `core/cpu.zig` — `Cpu(comptime opts)` with fixed stack, stack ops, register ops (no execution yet)
-
-### Phase 2: Execution Engine
-
-1. `core/template.zig` — comptime-bounded template search (forward, backward, bidirectional)
-2. CPU execution — implement all 32 instruction handlers in `core/cpu.zig`
-3. `core/creature.zig` — Creature struct with CPU + allocations
-
-### Phase 3: Lifecycle Management
-
-1. `sim/scheduler.zig` — Slicer and Reaper queues
-2. `sim/ancestor.zig` — Encode and comptime-validate the 80-instruction ancestor
-3. `sim/simulation.zig` — `Simulation(comptime opts)` main loop: inoculate → tick → reap
-
-### Phase 4: Evolution & Lineage
-
-1. `sim/mutation.zig` — Cosmic rays, copy errors, flaws
-2. `sim/genebank.zig` — Genotype tracking and naming
-3. Wire mutations into CPU execution and main loop
-4. `persistence/lineage.zig` — LineageEvent types, LineageWriter with background flush
-5. Wire lineage recording into creature birth/death/replication paths
-
-### Phase 5: Snapshots & Persistence
-
-1. `persistence/snapshot.zig` — Periodic snapshot writer with background thread
-2. Wire snapshots into main simulation loop
-3. `persistence/state.zig` — Full save/load for pause/resume
-
-### Phase 6: Visualization
-
-1. `display/display.zig` — Notcurses init/teardown
-2. `display/soup_view.zig` — Soup map
-3. `display/stats_view.zig` — Stats panel
-4. `display/creature_view.zig` and `display/size_histogram.zig`
-5. Wire display into main loop with input handling
-
-### Phase 7: Polish
-
-1. CLI argument parsing (`main.zig`) — `--config`, individual parameter overrides
-2. Performance profiling and optimization
+No module modifies `Config` after startup. It is effectively immutable for the lifetime of the
+simulation; changing it means editing `src/config.zon` and rebuilding.
 
 ---
 
@@ -981,8 +996,8 @@ Every module includes `test` blocks at the bottom of the file. Tests fall into t
   - Template search correctness
   - Queue ordering (slicer, reaper)
   - Mutation determinism with fixed seeds
-  - Config: parse `.zon` with all fields, partial fields (defaults fill in), invalid file returns error
-  - Build options: comptime validation for fixed-size simulation shapes
+  - Config: import `.zon`, default values match expectations, invalid values fail validation
+  - Config validation: comptime validation for fixed-size simulation shapes
   - Lineage: event serialization round-trip, JSONL formatting correctness
 2. **Integration tests** (cross-module):
   - Ancestor replicates itself correctly (CPU + Soup + Creature)
@@ -1009,12 +1024,11 @@ Run with: `zig build test` (unit + integration), `zig build test-integration` (d
 | Mutation bit range   | Only bit positions `0..4` of each instruction byte                                                                | Matches the paper's 60,000 instructions totaling 300,000 mutable bits                                                |
 | Soup addressing      | `u16`                                                                                                             | Supports up to 64K soups; matches the paper's ~60K default and keeps memory compact                                  |
 | Soup storage         | `Soup(comptime size)` with `[size]u8` and `[size]?CreatureId`                                                     | Moves arena shape and capacity to compile time; no allocator required for the core memory soup                       |
-| Build-time shape     | `BuildOptions` from `src/config.zon` imported with `@import`                                                      | Recompiles when memory layout changes; keeps runtime config focused on evolutionary behavior                         |
+| Config               | One `Config` object from `src/config.zon` imported with `@import`                                                 | Keeps shape and behavior values in one source of truth; changing config means rebuilding                             |
 | Creature storage     | ArrayList + free list                                                                                             | O(1) access by ID; IDs are indices                                                                                   |
 | Queue implementation | Intrusive doubly-linked list                                                                                      | O(1) insert/remove/reorder for slicer and reaper                                                                     |
 | RNG                  | `std.Random.Xoshiro256`                                                                                           | Fast, good statistical properties, seedable                                                                          |
 | Display binding      | `@cImport` + `pub usingnamespace` re-export, thin `err()`/default wrappers, `linkSystemLibrary("notcurses-core")` | Zero-cost FFI; single wrapper module re-exports all C symbols with Zig-friendly error conversion and struct defaults |
-| Runtime config       | Optional runtime-only `.zon` file parsed by `std.zon.fromSlice` at startup                                        | Zig-native format; struct defaults enable partial behavior config while fixed storage remains compile-time           |
 | Lineage tracking     | Append-only JSONL event log, background thread flush                                                              | Streamable, greppable, reconstructable into phylogenetic trees; async avoids simulation stalls                       |
-| Snapshot interval    | Configurable via `RuntimeConfig.snapshot_interval`                                                                | Lets user trade disk space for temporal resolution                                                                   |
+| Snapshot interval    | Configurable via `config.snapshot_interval`                                                                       | Lets user trade disk space for temporal resolution                                                                   |
 | Error handling       | Zig error unions                                                                                                  | Natural fit; CPU faults map to error returns                                                                         |

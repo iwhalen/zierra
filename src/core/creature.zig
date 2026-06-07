@@ -1,8 +1,9 @@
 const std = @import("std");
+const Allocation = @import("soup.zig").Allocation;
 
-const CreatureId = u8;
+pub const CreatureId = u16;
 
-const GenotypeId = struct {
+pub const GenotypeId = struct {
     size: u16, // Genome length in instructions
     code: [3]u8, // 3-letter label, e.g., "aaa"
 
