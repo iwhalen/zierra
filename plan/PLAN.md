@@ -69,7 +69,7 @@ needed for a phase is grouped under that phase header.
 
 ---
 
-### Phase 1: Compile-Time Shape
+### [x] Phase 1: Compile-Time Shape
 
 Goal: establish the fixed simulation shape, byte-addressed instruction storage, and the basic CPU state.
 
@@ -250,7 +250,6 @@ Goal: make one creature's CPU fetch, decode, execute, and advance through soup m
 
 **Contents:**
 
-- `pub fn TemplateSearch(comptime soup_size: u16, comptime search_limit: u16) type`
 - `searchForward(soup, start, limit) ?u16`
 - `searchBackward(soup, start, limit) ?u16`
 - `searchBidirectional(soup, start, limit) ?u16`

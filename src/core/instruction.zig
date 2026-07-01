@@ -54,6 +54,33 @@ pub fn encode(instruction: Instruction) u8 {
     return @intFromEnum(instruction);
 }
 
+pub fn is_nop(value: anytype) bool {
+    const T = @TypeOf(value);
+
+    if (comptime @typeInfo(T) == .optional) {
+        const inner = value orelse return false;
+        return is_nop(inner);
+    } else if (T == Instruction) {
+        return (value == Instruction.nop_0) or (value == Instruction.nop_1);
+    } else if (T == u8 or comptime @typeInfo(T) == .int) {
+        return (decode(value) == Instruction.nop_0) or (decode(value) == Instruction.nop_1);
+    } else {
+        @compileError("Invalid type given to `is_nop`.");
+    }
+}
+
+pub fn complement(value: ?Instruction) ?Instruction {
+    if (value == null) {
+        return value;
+    }
+
+    return switch (value.?) {
+        Instruction.nop_0 => Instruction.nop_1,
+        Instruction.nop_1 => Instruction.nop_0,
+        else => value,
+    };
+}
+
 test "Sanity check decoding" {
     const nop_0_as_int = 0x00;
     const nop_0_decoded = decode(nop_0_as_int);
@@ -87,4 +114,14 @@ test "Sanity check encoding" {
 
     const inc_b_encoded = encode(Instruction.inc_b);
     try testing.expectEqual(0x09, inc_b_encoded);
+}
+
+test "is nop" {
+    try testing.expect(is_nop(@as(u8, 0x00)));
+    try testing.expect(is_nop(@as(u8, 0x01)));
+    try testing.expect(!is_nop(@as(u8, 0x1c)));
+
+    try testing.expect(is_nop(Instruction.nop_0));
+    try testing.expect(is_nop(Instruction.nop_1));
+    try testing.expect(!is_nop(Instruction.adr));
 }

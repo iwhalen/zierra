@@ -29,8 +29,9 @@ pub fn Soup(comptime size: u16) type {
 
         memory: [size]?Instruction = .{null} ** size,
         owner: [size]?CreatureId = .{null} ** size,
+        len: u16 = size,
 
-        pub fn read(self: *const Self, address: u16) Instruction {
+        pub fn read(self: *const Self, address: u16) ?Instruction {
             return self.memory[address];
         }
 
@@ -118,6 +119,7 @@ pub fn Soup(comptime size: u16) type {
 
 test "test constructor" {
     const soup = Soup(1234){};
+    try testing.expectEqual(1234, soup.len);
     try testing.expectEqual(1234, soup.memory.len);
     try testing.expectEqual(1234, soup.owner.len);
     try testing.expectEqual(null, soup.memory[0]);
