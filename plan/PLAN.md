@@ -250,45 +250,202 @@ Goal: make one creature's CPU fetch, decode, execute, and advance through soup m
 
 **Contents:**
 
-- `searchForward(soup, start, limit) ?u16`
-- `searchBackward(soup, start, limit) ?u16`
-- `searchBidirectional(soup, start, limit) ?u16`
-- Extract the NOP pattern following `start`, then find the complementary pattern
+- [x] `searchForward(soup, start, limit) ?u16`
+- [x] `searchBackward(soup, start, limit) ?u16`
+- [x] `searchBidirectional(soup, start, limit) ?u16`
+- [x] Extract the NOP pattern following `start`, then find the complementary pattern
 
 When the limit is fixed at compile time, loops can be bounded with comptime-known constants. Runtime
 limits may still be useful for tests or experiments.
 
 **Tests:**
 
-- Forward, backward, and bidirectional search
-- Not-found behavior
-- Template extraction at wrap-around boundaries
+- [x] Forward, backward, and bidirectional search
+- [x] Not-found behavior
+- [x] Template extraction at wrap-around boundaries
 
 #### CPU Execution (`src/core/cpu.zig`)
 
 **Contents:**
 
-- `execute(cpu: *Cpu, instruction: Instruction, soup: *Soup, creature: *Creature) !ExecAction`
-- `step(cpu: *Cpu, soup: *Soup, creature: *Creature) !ExecAction`
+- `execute(cpu: *Cpu, instruction: Instruction, soup: *Soup, creature: *Creature) !ExecResult`
+- `step(cpu: *Cpu, soup: *Soup, creature: *Creature) !ExecResult`
 - Implement all 32 instruction handlers:
   - arithmetic/register ops
   - stack ops
   - control flow and template-addressing ops
   - memory/copy ops
   - lifecycle signaling ops (`mal`, `divide`)
-- Return `ExecAction` for side effects that belong to the simulation layer:
+- Return `ExecResult` for side effects that belong to the simulation layer:
   - `none`
   - `divide`
   - `mal_request`
   - `error_condition`
   - `hard_instruction_success`
 
+**Responsibility split:**
+
+- `step` owns the fetch-decode-dispatch-counter cycle (mirrors the paper's
+  `time_slice`: `fetch` → `decode` → `execute` → `increment_ip`). It never
+  allocates memory, creates creatures, or moves queues.
+- `execute` owns all CPU-local effects: registers, stack, `fl`, soup reads/writes
+  via `soup.read`/`soup.write`, **and every `ip` update**. `step` never advances
+  `ip` itself, which removes the double-advance hazard where a successful jump
+  would be incremented past its target.
+- The simulation owns everything `ExecResult` reports (see Phase 3
+  "`ExecResult` handling"): allocation, division, `creature.errors` counting,
+  and reaper movement. `step`/`execute` only *return* the result; they do not
+  touch queues or the genebank.
+
+**`step` pseudo code:**
+
+```text
+step(cpu, soup, creature):
+    # 1. Fetch. All address arithmetic wraps modulo soup length,
+    #    so the soup behaves as a circular arena.
+    raw = soup.read(wrap(cpu.ip))
+
+    # 2. Empty cell. Only reachable if the soup type models
+    #    uninitialized cells as null (the paper's soup is always
+    #    full of random bits, so every fetch decodes to something).
+    if raw is empty:
+        cpu.fl = 1
+        cpu.ip = wrap(cpu.ip + 1)   # always advance: never re-execute a fault
+        creature.instructions_executed += 1
+        return error_condition      # simulation counts the error, moves reaper up
+
+    # 3. Decode (masks to the low 5 bits per the storage rule) and dispatch.
+    instruction = decode(raw)
+    result = execute(cpu, instruction, soup, creature)
+
+    # 4. Count the executed instruction. Error counting lives in the
+    #    simulation's error_condition branch, not here.
+    creature.instructions_executed += 1
+    return result
+```
+
+**`execute` dispatch rules (per instruction group):**
+
+```text
+execute(cpu, instruction, soup, creature):
+    switch instruction:
+        # Plain ops: nop_0, nop_1, or1, shl, zero, sub_ab, sub_ac,
+        # inc_a, inc_b, dec_c, inc_c, mov_cd, mov_ab.
+        # Apply register effect (with flaw hook where configured),
+        # then default advance:
+        #     cpu.ip = wrap(cpu.ip + 1)
+        #     return none
+
+        # Stack ops: push_ax/bx/cx/dx, pop_ax/bx/cx/dx.
+        # On success: move value, default advance, return none.
+        # On StackOverflow/StackUnderflow (fl is already set by
+        # push/pop itself): still default-advance past the failing
+        # instruction, return error_condition.
+
+        # if_cz: conditional skip.
+        #     if cpu.cx == 0: cpu.ip = wrap(cpu.ip + 1)   # run next instr
+        #     else: skip one instruction AND its template, if any:
+        #         target = wrap(cpu.ip + 1)
+        #         if soup cell at target starts a template-user
+        #         (jmp, jmpb, call, adr, adrb, adrf):
+        #             target = skip_template(soup, target)
+        #         else:
+        #             target = wrap(target + 1)
+        #         cpu.ip = target
+        #     return none
+
+        # Jumps: jmp (bidirectional), jmpb (backward), call (bidirectional + push).
+        #     pattern_start = wrap(cpu.ip + 1)
+        #     match = template.search_*(soup, pattern_start, search_limit)
+        #     if match is null:
+        #         cpu.fl = 1
+        #         cpu.ip = skip_template(soup, cpu.ip)  # land past our own NOPs
+        #         return error_condition
+        #     if instruction is call:
+        #         try push(wrap(cpu.ip + 1 + template_len))  # return addr past our NOPs
+        #         on overflow: fl set, ip = skip_template, return error_condition
+        #     cpu.ip = match   # match is already "after the complementary template"
+        #     return none
+
+        # ret:
+        #     on pop success: cpu.ip = wrap(popped_value); return none
+        #     on StackUnderflow: fl set, default advance, return error_condition
+
+        # Address-to-register: adr (bidirectional), adrb (backward), adrf (forward).
+        # Same search as jumps, but writes the result instead of jumping:
+        #     if match is null: fl = 1, ip = skip_template, return error_condition
+        #     else: cpu.ax = match, ip = skip_template, return hard_instruction_success
+        # (hard_instruction_success lets the simulation move the creature
+        # down the reaper queue; see Phase 3.)
+
+        # mov_iab (copy with ownership check):
+        #     data = soup.read(wrap(cpu.bx))       # read is always allowed
+        #     if data is empty: fl = 1, default advance, return error_condition
+        #     try soup.write(wrap(cpu.ax), maybeCopyError(data), creature.id)
+        #     on WriteProtected: fl = 1, default advance, return error_condition
+        #     on success: cpu.ax = wrap(cpu.ax + 1); cpu.bx = wrap(cpu.bx + 1)
+        #         creature.instructions_copied += 1
+        #         cpu.ip = wrap(old_ip + 1)   # old_ip = ip on entry to mov_iab
+        #         return none
+        # Note: ax/bx wrap independently of ip; all three use modulo soup length.
+
+        # mal: do NOT allocate here; the simulation owns the soup free list.
+        #     cpu.ip = wrap(cpu.ip + 1)   # advance BEFORE returning,
+        #                                 # or the same mal re-executes forever
+        #     return mal_request { size = cpu.cx }
+
+        # divide: do NOT create the creature here.
+        #     if creature.daughter_alloc is null:
+        #         cpu.fl = 1; cpu.ip = wrap(cpu.ip + 1); return error_condition
+        #     cpu.ip = wrap(cpu.ip + 1)   # same advance-first rule as mal
+        #     return divide { daughter_alloc = creature.daughter_alloc }
+```
+
+**IP helpers used above:**
+
+```text
+wrap(addr): addr mod soup.len
+
+skip_template(soup, instr_addr):
+    # Width of "this instruction plus its trailing NOP template", or 1
+    # when the next cell is not a NOP. Used both for landing past our own
+    # template after a failed search and for if_cz skipping over a
+    # template-user plus its NOPs.
+    length = count of consecutive NOP cells starting at wrap(instr_addr + 1)
+    return wrap(instr_addr + 1 + length)
+```
+
+**Flag and counter ownership (who writes what):**
+
+- `cpu.fl`: set to `1` by `push`/`pop` failures, failed template searches,
+  failed ownership checks, empty-cell fetch, and `divide` with no daughter;
+  cleared to `0` by successful `push`/`pop`. Successful `adr*` reports via
+  `hard_instruction_success` rather than touching `fl` directly.
+- `creature.instructions_executed`: incremented once per `step`, on every path
+  including faults.
+- `creature.instructions_copied`: incremented only by successful `mov_iab`
+  inside `execute`.
+- `creature.errors`: incremented only by the simulation's `error_condition`
+  branch, never by `step`/`execute` (keeps reaper policy in one place).
+
 **Tests:**
 
 - Each instruction in isolation
 - Full step cycle: fetch, decode, execute, advance IP
+- `step` on an empty cell returns `error_condition` and advances `ip`
+- Jump/call land on the address *after* the complementary template; failed
+  search sets `fl`, lands past the instruction's own NOPs, returns
+  `error_condition`
+- `if_cz` with `cx != 0` skips a plain instruction (width 1) and skips a
+  template-user plus its NOPs (width 1 + template length)
+- `call` pushes the return address past its own template; `ret` pops it back
+- `mov_iab` advances `ax`/`bx`, counts the copy, and returns `error_condition`
+  on write-protection instead of propagating the soup error
+- `mal`/`divide` advance `ip` before returning their `ExecResult`, and
+  `divide` without a daughter allocation returns `error_condition`
 - Error flag behavior
-- `ExecAction` behavior for `mal` and `divide`
+- `ExecResult` behavior for `mal` and `divide`
+- Wrap-around: `ip`, `ax`, `bx` arithmetic modulo soup length
 
 #### Creature (`src/core/creature.zig`)
 
@@ -314,7 +471,11 @@ Represents a living organism in the soup.
 - Construction and field defaults
 - Error accumulation
 
-Useful Ziglings: exercises on tagged unions, switches, optionals, pointers, and error handling.
+Useful Ziglings: 030_switch / 108_labeled_switch (dispatch in `execute`), 035_enums
+(switching over `Instruction`), 045_optionals (empty-cell fetch, nullable search
+results), 039_pointers (`*Cpu`/`*Soup`/`*Creature` mutation in `step`), 021_errors
+through 024_errors4 plus 033_iferror (`StackError`, `WriteProtected` mapped to
+`error_condition`), and 055_unions (the `ExecResult` tagged union).
 
 ---
 
@@ -381,11 +542,52 @@ Ties together soup, CPU, creatures, scheduler queues, and the main loop.
 - `inoculate(ancestor_code: []const u8) !CreatureId`
 - `tick()`:
   1. Execute the current creature's time slice
-  2. Handle `ExecAction` values from CPU steps
+  2. Handle `ExecResult` values from CPU steps
   3. Advance slicer
   4. Reap while free memory is below threshold
   5. Update stats
 - `run(max_instructions: u64)`
+
+**`ExecResult` handling:**
+
+`ExecResult` reports only work that crosses the CPU/soup boundary and must be completed by the
+simulation. CPU-local effects such as changing registers, the stack, flags, or the instruction pointer
+are applied by `execute` itself.
+
+`ExecResult` is a tagged union, not a struct containing independent boolean flags. Each call returns
+exactly one active result. Results such as `mal_request` and `divide` carry data needed by the
+simulation, while `none`, `error_condition`, and `hard_instruction_success` carry no additional data.
+
+- `none`:
+  - No additional simulation work is required after CPU execution.
+  - The instruction may still have changed CPU registers, stack state, flags, the instruction pointer,
+    or soup memory.
+- `mal_request { size }`:
+  - Request a daughter-cell allocation of `size` instructions, normally taken from `cpu.cx`.
+  - Reject the request if the creature already owns a daughter allocation.
+  - On success, assign ownership of the allocation to the requesting creature, store it in
+    `creature.daughter_alloc`, and place its starting address in `cpu.ax`.
+  - On failure, set the CPU error flag and process the outcome as an `error_condition`.
+- `divide { daughter_alloc }`:
+  - Reject division when the creature has no valid daughter allocation.
+  - Remove the mother's write privileges over the daughter allocation and clear
+    `mother.daughter_alloc`, allowing the mother to request another daughter cell later.
+  - Create a new creature and CPU whose mother allocation is the former daughter allocation, and set
+    the daughter's initial instruction pointer.
+  - Insert the daughter into the slicer queue immediately ahead of its mother and at the bottom of the
+    reaper queue.
+  - Update population, genotype, lineage, and replication statistics.
+- `error_condition`:
+  - The CPU sets `fl = 1` when it detects the failed instruction.
+  - Increment `creature.errors` and attempt to move the creature one position toward the top of the
+    reaper queue, subject to the queue's error-count ordering constraint.
+- `hard_instruction_success`:
+  - Clear the CPU error flag as appropriate for the successful instruction.
+  - Attempt to move the creature one position toward the bottom of the reaper queue, subject to the
+    queue's error-count ordering constraint.
+  - The original paper says that two difficult instructions receive this treatment but does not name
+    them in its prose; verify their identities against the original simulator before fixing this result
+    to particular opcodes.
 
 **Tests:**
 
@@ -786,7 +988,7 @@ The simulation passes `*Creature` to `cpu.step()`, which accesses `creature.moth
 Certain instructions have side effects beyond the CPU and soup. The CPU signals these via a returned action enum rather than calling the simulation directly (keeps CPU decoupled from lifecycle management):
 
 ```zig
-const ExecAction = union(enum) {
+const ExecResult = union(enum) {
     none,
     divide: struct {                     // `divide` instruction executed
         daughter_alloc: Allocation,      // Memory block for the new creature
@@ -798,6 +1000,9 @@ const ExecAction = union(enum) {
     hard_instruction_success,            // Successfully executed a "hard" instruction (adr/mal)
 };
 ```
+
+`execute` and `step` return `!ExecResult`. A `.none` result means execution completed without requiring
+simulation-level work; it does not mean that the instruction had no CPU-local effects.
 
 The simulation loop inspects this action after each `step()` call to:
 

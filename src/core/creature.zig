@@ -3,6 +3,25 @@ const Allocation = @import("soup.zig").Allocation;
 
 pub const CreatureId = u16;
 
+pub fn Creature(comptime CpuType: type) type {
+    return struct {
+        id: CreatureId,
+
+        // Each creature has its own CPU.
+        cpu: CpuType,
+
+        mother_alloc: Allocation,
+        daughter_alloc: Allocation,
+
+        errors: u16 = 0,
+        instructions_executed: u16 = 0,
+        instructions_copied: u16 = 0,
+
+        parent_genotype: ?GenotypeId,
+        origin_time: u16,
+    };
+}
+
 pub const GenotypeId = struct {
     size: u16, // Genome length in instructions
     code: [3]u8, // 3-letter label, e.g., "aaa"

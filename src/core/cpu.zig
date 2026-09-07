@@ -1,7 +1,32 @@
 const std = @import("std");
 const testing = std.testing;
+const creature_module = @import("creature.zig");
+const Creature = creature_module.Creature;
+const CreatureId = creature_module.CreatureId;
+const instruction_module = @import("instruction.zig");
+const Instruction = instruction_module.Instruction;
+const decode = instruction_module.decode;
+const soup_module = @import("soup.zig");
+const Soup = soup_module.Soup;
+const Allocation = soup_module.Allocation;
 
 pub const StackError = error{ StackOverflow, StackUnderflow };
+pub const ExecutionError = error{NullInstructionError};
+
+// Tracks if the execution result requires any extra work to be done
+// by the simulation.
+pub const ExecResult = union(enum) {
+    // True if no extra work is needed from the simulation.
+    none: bool,
+    // Memory allocation request for new creature.
+    divide: struct { daughter_alloc: Allocation },
+    // Creature request for memory.
+    mal_request: u16,
+    // True if an instruction generated an error flag.
+    error_condition: bool,
+    // True if a creature successful executed a hard instruction (adr/mal).
+    hard_instruction_success: bool,
+};
 
 pub fn CPU(comptime stack_depth: u16) type {
     if (comptime stack_depth <= 0) {
@@ -54,6 +79,33 @@ pub fn CPU(comptime stack_depth: u16) type {
             self.sp -= 1;
             self.fl = 0;
             return self.stack[self.sp];
+        }
+
+        pub fn step(self: *Self, soup: anytype, creature: anytype) !ExecResult {
+            const read: ?Instruction = soup.read(self.ip);
+            const instruction: Instruction = undefined;
+
+            if (read == null) {
+                return ExecutionError.NullInstructionError;
+            } else {
+                instruction = read;
+            }
+
+            const result = self.execute(instruction, soup, creature.id);
+
+            if (self.ip == soup.len - 1) {
+                self.ip = 0;
+            } else {
+                self.ip += 1;
+            }
+
+            creature.instructions_executed += 1;
+
+            return result;
+        }
+
+        pub fn execute(self: *Self, instruction: Instruction, soup: anytype, creature_id: CreatureId) !ExecResult {
+            
         }
     };
 }
