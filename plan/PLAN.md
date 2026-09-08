@@ -268,8 +268,8 @@ limits may still be useful for tests or experiments.
 
 **Contents:**
 
-- `execute(cpu: *Cpu, instruction: Instruction, soup: *Soup, creature: *Creature) !ExecResult`
-- `step(cpu: *Cpu, soup: *Soup, creature: *Creature) !ExecResult`
+- `execute(cpu: *Cpu, instruction: Instruction, soup: *Soup, creature: *Creature) ExecResult`
+- `step(cpu: *Cpu, soup: *Soup, creature: *Creature) ExecResult`
 - Implement all 32 instruction handlers:
   - arithmetic/register ops
   - stack ops
@@ -392,13 +392,13 @@ execute(cpu, instruction, soup, creature):
         # mal: do NOT allocate here; the simulation owns the soup free list.
         #     cpu.ip = wrap(cpu.ip + 1)   # advance BEFORE returning,
         #                                 # or the same mal re-executes forever
-        #     return mal_request { size = cpu.cx }
+        #     return mal_request(cpu.cx)
 
         # divide: do NOT create the creature here.
         #     if creature.daughter_alloc is null:
         #         cpu.fl = 1; cpu.ip = wrap(cpu.ip + 1); return error_condition
         #     cpu.ip = wrap(cpu.ip + 1)   # same advance-first rule as mal
-        #     return divide { daughter_alloc = creature.daughter_alloc }
+        #     return divide(creature.daughter_alloc)
 ```
 
 **IP helpers used above:**
@@ -555,20 +555,27 @@ simulation. CPU-local effects such as changing registers, the stack, flags, or t
 are applied by `execute` itself.
 
 `ExecResult` is a tagged union, not a struct containing independent boolean flags. Each call returns
-exactly one active result. Results such as `mal_request` and `divide` carry data needed by the
-simulation, while `none`, `error_condition`, and `hard_instruction_success` carry no additional data.
+exactly one active result. Variants carry a payload only when the simulation needs data: `mal_request`
+carries the requested size and `divide` carries the daughter allocation. `none`, `error_condition`,
+and `hard_instruction_success` are payload-free tags; giving them boolean payloads would permit
+meaningless states such as `.none = false`.
+
+Expected Tierran execution failures are values, not Zig errors. Stack overflow or underflow, failed
+template searches, write protection, and invalid lifecycle operations are converted to
+`error_condition` inside `execute`. Zig error unions remain reserved for unexpected infrastructure or
+programming failures that cannot be represented as an execution outcome.
 
 - `none`:
   - No additional simulation work is required after CPU execution.
   - The instruction may still have changed CPU registers, stack state, flags, the instruction pointer,
     or soup memory.
-- `mal_request { size }`:
+- `mal_request: size`:
   - Request a daughter-cell allocation of `size` instructions, normally taken from `cpu.cx`.
   - Reject the request if the creature already owns a daughter allocation.
   - On success, assign ownership of the allocation to the requesting creature, store it in
     `creature.daughter_alloc`, and place its starting address in `cpu.ax`.
   - On failure, set the CPU error flag and process the outcome as an `error_condition`.
-- `divide { daughter_alloc }`:
+- `divide: daughter_alloc`:
   - Reject division when the creature has no valid daughter allocation.
   - Remove the mother's write privileges over the daughter allocation and clear
     `mother.daughter_alloc`, allowing the mother to request another daughter cell later.
@@ -990,19 +997,16 @@ Certain instructions have side effects beyond the CPU and soup. The CPU signals 
 ```zig
 const ExecResult = union(enum) {
     none,
-    divide: struct {                     // `divide` instruction executed
-        daughter_alloc: Allocation,      // Memory block for the new creature
-    },
-    mal_request: struct {                // `mal` instruction — creature wants memory
-        size: u16,                       // Requested allocation size (from cx register)
-    },
+    divide: Allocation,                  // Memory block for the new creature
+    mal_request: u16,                    // Requested allocation size (from cx register)
     error_condition,                     // An instruction generated an error flag
     hard_instruction_success,            // Successfully executed a "hard" instruction (adr/mal)
 };
 ```
 
-`execute` and `step` return `!ExecResult`. A `.none` result means execution completed without requiring
-simulation-level work; it does not mean that the instruction had no CPU-local effects.
+`execute` and `step` return `ExecResult`. A `.none` result means execution completed without requiring
+simulation-level work; it does not mean that the instruction had no CPU-local effects. Expected virtual
+machine faults return `.error_condition` rather than escaping through a Zig error union.
 
 The simulation loop inspects this action after each `step()` call to:
 

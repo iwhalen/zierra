@@ -17,15 +17,15 @@ pub const ExecutionError = error{NullInstructionError};
 // by the simulation.
 pub const ExecResult = union(enum) {
     // True if no extra work is needed from the simulation.
-    none: bool,
+    none,
     // Memory allocation request for new creature.
-    divide: struct { daughter_alloc: Allocation },
+    divide: Allocation,
     // Creature request for memory.
-    mal_request: u16,
+    mal_request,
     // True if an instruction generated an error flag.
-    error_condition: bool,
+    error_condition,
     // True if a creature successful executed a hard instruction (adr/mal).
-    hard_instruction_success: bool,
+    hard_instruction_success,
 };
 
 pub fn CPU(comptime stack_depth: u16) type {
@@ -83,7 +83,7 @@ pub fn CPU(comptime stack_depth: u16) type {
 
         pub fn step(self: *Self, soup: anytype, creature: anytype) !ExecResult {
             const read: ?Instruction = soup.read(self.ip);
-            const instruction: Instruction = undefined;
+            var instruction: Instruction = undefined;
 
             if (read == null) {
                 return ExecutionError.NullInstructionError;
@@ -91,21 +91,114 @@ pub fn CPU(comptime stack_depth: u16) type {
                 instruction = read;
             }
 
-            const result = self.execute(instruction, soup, creature.id);
-
-            if (self.ip == soup.len - 1) {
-                self.ip = 0;
-            } else {
-                self.ip += 1;
-            }
+            const result = self.execute(instruction, soup, creature);
 
             creature.instructions_executed += 1;
 
             return result;
         }
 
-        pub fn execute(self: *Self, instruction: Instruction, soup: anytype, creature_id: CreatureId) !ExecResult {
-            
+        pub fn execute(self: *Self, instruction: Instruction, soup: anytype, creature: anytype) ExecResult {
+            _ = creature;
+
+            switch (instruction) {
+                // Plain register operations and no operations.
+                Instruction.nop_0 => return self.nop(soup.len),
+                Instruction.nop_1 => return self.nop(soup.len),
+                Instruction.or1 => return self.or1(soup.len),
+                Instruction.shl => return self.shl(soup.len),
+                Instruction.zero => return self.zero(soup.len),
+                Instruction.sub_ab => return self.sub_ab(soup.len),
+                Instruction.sub_ac => return self.sub_ac(soup.len),
+                Instruction.inc_a => return self.inc_a(soup.len),
+                Instruction.inc_b => return self.inc_b(soup.len),
+                Instruction.dec_c => return self.dec_c(soup.len),
+                Instruction.inc_c => return self.inc_c(soup.len),
+                Instruction.mov_cd => return self.mov_cd(soup.len),
+                Instruction.mov_ab => return self.mov_ab(soup.len),
+            }
+        }
+
+        pub fn advance_ip(self: *Self, increment: u16, soup_len: u16) void {
+            const step_size = increment % soup_len;
+            const threshold = soup_len - step_size;
+
+            if (self.ip < threshold) {
+                self.ip += step_size;
+            } else {
+                self.ip -= threshold;
+            }
+        }
+
+        pub fn nop(self: *Self, soup_len: u16) ExecResult {
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
+        }
+
+        pub fn or1(self: *Self, soup_len: u16) ExecResult {
+            self.cx ^= 1;
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
+        }
+
+        pub fn shl(self: *Self, soup_len: u16) ExecResult {
+            self.cx <<= 1;
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
+        }
+
+        pub fn zero(self: *Self, soup_len: u16) ExecResult {
+            self.cx = 0;
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
+        }
+
+        pub fn sub_ab(self: *Self, soup_len: u16) ExecResult {
+            self.cx = self.ax - self.bx;
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
+        }
+
+        pub fn sub_ac(self: *Self, soup_len: u16) ExecResult {
+            self.ax = self.ax - self.cx;
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
+        }
+
+        pub fn inc_a(self: *Self, soup_len: u16) ExecResult {
+            self.ax += 1;
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
+        }
+
+        pub fn inc_b(self: *Self, soup_len: u16) ExecResult {
+            self.bx += 1;
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
+        }
+
+        pub fn dec_c(self: *Self, soup_len: u16) ExecResult {
+            self.cx -= 1;
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
+        }
+
+        pub fn inc_c(self: *Self, soup_len: u16) ExecResult {
+            self.cx += 1;
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
+        }
+
+        pub fn mov_cd(self: *Self, soup_len: u16) ExecResult {
+            self.dx = self.cx;
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
+        }
+
+        pub fn mov_ab(self: *Self, soup_len: u16) ExecResult {
+            self.bx = self.ax;
+            self.advance_ip(1, soup_len);
+            return ExecResult.none;
         }
     };
 }
