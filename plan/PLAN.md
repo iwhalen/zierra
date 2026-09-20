@@ -270,7 +270,9 @@ limits may still be useful for tests or experiments.
 
 - `execute(cpu: *Cpu, instruction: Instruction, soup: *Soup, creature: *Creature) ExecResult`
 - `step(cpu: *Cpu, soup: *Soup, creature: *Creature) ExecResult`
-- Implement all 32 instruction handlers:
+- `advance_ip(increment: u16, soup_len: u16)` — overflow-safe `ip` advance, no promotion needed
+- Implement all 32 instruction handlers, each taking `soup_len: u16` for `ip` updates:
+  - e.g. `nop(cpu: *Cpu, soup_len: u16)`, `or1(cpu: *Cpu, soup_len: u16)`, ...
   - arithmetic/register ops
   - stack ops
   - control flow and template-addressing ops
@@ -310,7 +312,7 @@ step(cpu, soup, creature):
     #    full of random bits, so every fetch decodes to something).
     if raw is empty:
         cpu.fl = 1
-        cpu.ip = wrap(cpu.ip + 1)   # always advance: never re-execute a fault
+        cpu.advance_ip(1, soup.len)   # always advance: never re-execute a fault
         creature.instructions_executed += 1
         return error_condition      # simulation counts the error, moves reaper up
 
@@ -331,9 +333,9 @@ execute(cpu, instruction, soup, creature):
     switch instruction:
         # Plain ops: nop_0, nop_1, or1, shl, zero, sub_ab, sub_ac,
         # inc_a, inc_b, dec_c, inc_c, mov_cd, mov_ab.
-        # Apply register effect (with flaw hook where configured),
-        # then default advance:
-        #     cpu.ip = wrap(cpu.ip + 1)
+        # Each handler takes soup_len and applies register effect
+        # (with flaw hook where configured), then default advance:
+        #     cpu.advance_ip(1, soup.len)
         #     return none
 
         # Stack ops: push_ax/bx/cx/dx, pop_ax/bx/cx/dx.
@@ -343,7 +345,7 @@ execute(cpu, instruction, soup, creature):
         # instruction, return error_condition.
 
         # if_cz: conditional skip.
-        #     if cpu.cx == 0: cpu.ip = wrap(cpu.ip + 1)   # run next instr
+        #     if cpu.cx == 0: cpu.advance_ip(1, soup.len)   # run next instr
         #     else: skip one instruction AND its template, if any:
         #         target = wrap(cpu.ip + 1)
         #         if soup cell at target starts a template-user
@@ -385,26 +387,35 @@ execute(cpu, instruction, soup, creature):
         #     on WriteProtected: fl = 1, default advance, return error_condition
         #     on success: cpu.ax = wrap(cpu.ax + 1); cpu.bx = wrap(cpu.bx + 1)
         #         creature.instructions_copied += 1
-        #         cpu.ip = wrap(old_ip + 1)   # old_ip = ip on entry to mov_iab
+        #         cpu.advance_ip(1, soup.len)   # old_ip = ip on entry to mov_iab
         #         return none
         # Note: ax/bx wrap independently of ip; all three use modulo soup length.
 
         # mal: do NOT allocate here; the simulation owns the soup free list.
-        #     cpu.ip = wrap(cpu.ip + 1)   # advance BEFORE returning,
-        #                                 # or the same mal re-executes forever
+        #     cpu.advance_ip(1, soup.len)   # advance BEFORE returning,
+        #                                   # or the same mal re-executes forever
         #     return mal_request(cpu.cx)
 
         # divide: do NOT create the creature here.
         #     if creature.daughter_alloc is null:
-        #         cpu.fl = 1; cpu.ip = wrap(cpu.ip + 1); return error_condition
-        #     cpu.ip = wrap(cpu.ip + 1)   # same advance-first rule as mal
+        #         cpu.fl = 1; cpu.advance_ip(1, soup.len); return error_condition
+        #     cpu.advance_ip(1, soup.len)   # same advance-first rule as mal
         #     return divide(creature.daughter_alloc)
 ```
 
 **IP helpers used above:**
 
 ```text
-wrap(addr): addr mod soup.len
+advance_ip(increment, soup_len):
+    # Overflow-safe ip update without promoting to a wider int.
+    # Assumes ip < soup_len and soup_len > 0.
+    step = increment mod soup_len
+    threshold = soup_len - step
+    if ip < threshold: ip += step
+    else: ip -= threshold
+
+wrap(addr): addr mod soup.len   # for address reads (bx/ax/pattern_start),
+                                # ip itself always moves via advance_ip
 
 skip_template(soup, instr_addr):
     # Width of "this instruction plus its trailing NOP template", or 1

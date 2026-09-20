@@ -52,9 +52,9 @@ pub fn CPU(comptime stack_depth: u16) type {
         fl: u8 = 0x00,
 
         // Stack pointer
-        sp: u8 = 0x00,
+        sp: u16 = 0x00,
 
-        stack: [stack_depth]?u16 = .{null} ** stack_depth,
+        stack: [stack_depth]u16 = undefined,
 
         // Instruction pointer
         ip: u16 = 0x000,
@@ -70,7 +70,7 @@ pub fn CPU(comptime stack_depth: u16) type {
             self.fl = 0;
         }
 
-        pub fn pop(self: *Self) StackError!?u16 {
+        pub fn pop(self: *Self) StackError!u16 {
             if (self.sp == 0) {
                 self.fl = 1;
                 return StackError.StackUnderflow;
@@ -102,7 +102,7 @@ pub fn CPU(comptime stack_depth: u16) type {
             _ = creature;
 
             switch (instruction) {
-                // Plain register operations and no operations.
+                // Plain register operations and no ops.
                 Instruction.nop_0 => return self.nop(soup.len),
                 Instruction.nop_1 => return self.nop(soup.len),
                 Instruction.or1 => return self.or1(soup.len),
@@ -116,6 +116,15 @@ pub fn CPU(comptime stack_depth: u16) type {
                 Instruction.inc_c => return self.inc_c(soup.len),
                 Instruction.mov_cd => return self.mov_cd(soup.len),
                 Instruction.mov_ab => return self.mov_ab(soup.len),
+                // Stack operations
+                Instruction.push_ax => return self.execute_push(soup.len, self.ax),
+                Instruction.push_bx => return self.execute_push(soup.len, self.bx),
+                Instruction.push_cx => return self.execute_push(soup.len, self.cx),
+                Instruction.push_dx => return self.execute_push(soup.len, self.dx),
+                Instruction.pop_ax => return self.execute_pop(soup.len, &self.ax),
+                Instruction.pop_bx => return self.execute_pop(soup.len, &self.bx),
+                Instruction.pop_cx => return self.execute_pop(soup.len, &self.cx),
+                Instruction.pop_dx => return self.execute_pop(soup.len, &self.dx),
             }
         }
 
@@ -200,6 +209,27 @@ pub fn CPU(comptime stack_depth: u16) type {
             self.advance_ip(1, soup_len);
             return ExecResult.none;
         }
+
+        pub fn execute_push(self: *Self, soup_len: u16, value: u16) ExecResult {
+            self.advance_ip(1, soup_len);
+
+            self.push(value) catch {
+                return ExecResult.error_condition;
+            };
+
+            return ExecResult.none;
+        }
+
+        pub fn execute_pop(self: *Self, soup_len: u16, destination: *u16) ExecResult {
+            self.advance_ip(1, soup_len);
+
+            const result = self.pop() catch {
+                return ExecResult.error_condition;
+            };
+
+            destination.* = result;
+            return ExecResult.none;
+        }
     };
 }
 
@@ -234,3 +264,9 @@ test "push pop roundtrip" {
     try testing.expectEqual(1, cpu.pop());
     try testing.expectEqual(0, cpu.fl);
 }
+
+//
+// Disgusting AI generated unit tests.
+//
+
+// TODO
