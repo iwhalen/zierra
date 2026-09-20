@@ -9,6 +9,9 @@ const decode = instruction_module.decode;
 const soup_module = @import("soup.zig");
 const Soup = soup_module.Soup;
 const Allocation = soup_module.Allocation;
+const template_module = @import("template.zig");
+const count_nops_at = template_module.count_nops_at;
+const wrap_increment = template_module.wrap_increment;
 
 pub const StackError = error{ StackOverflow, StackUnderflow };
 pub const ExecutionError = error{NullInstructionError};
@@ -28,7 +31,9 @@ pub const ExecResult = union(enum) {
     hard_instruction_success,
 };
 
-pub fn CPU(comptime stack_depth: u16) type {
+pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
+    _ = search_limit;
+
     if (comptime stack_depth <= 0) {
         @compileError("Stack depth must be positive.");
     }
@@ -102,9 +107,8 @@ pub fn CPU(comptime stack_depth: u16) type {
             _ = creature;
 
             switch (instruction) {
-                // Plain register operations and no ops.
-                Instruction.nop_0 => return self.nop(soup.len),
-                Instruction.nop_1 => return self.nop(soup.len),
+                // Plain register operations and no ops
+                Instruction.nop_0, Instruction.nop_1 => return self.nop(soup.len),
                 Instruction.or1 => return self.or1(soup.len),
                 Instruction.shl => return self.shl(soup.len),
                 Instruction.zero => return self.zero(soup.len),
@@ -125,18 +129,18 @@ pub fn CPU(comptime stack_depth: u16) type {
                 Instruction.pop_bx => return self.execute_pop(soup.len, &self.bx),
                 Instruction.pop_cx => return self.execute_pop(soup.len, &self.cx),
                 Instruction.pop_dx => return self.execute_pop(soup.len, &self.dx),
+                // Conditional skip
+                Instruction.if_cz => return self.if_cz(soup),
+                // Jumps
+                // Address to register
+                // Copy
+                // Allocation
+                // Divide
             }
         }
 
         pub fn advance_ip(self: *Self, increment: u16, soup_len: u16) void {
-            const step_size = increment % soup_len;
-            const threshold = soup_len - step_size;
-
-            if (self.ip < threshold) {
-                self.ip += step_size;
-            } else {
-                self.ip -= threshold;
-            }
+            self.ip = wrap_increment(self.ip, increment, soup_len);
         }
 
         pub fn nop(self: *Self, soup_len: u16) ExecResult {
@@ -230,11 +234,34 @@ pub fn CPU(comptime stack_depth: u16) type {
             destination.* = result;
             return ExecResult.none;
         }
+
+        pub fn if_cz(self: *Self, soup: anytype) ExecResult {
+            if (self.cx == 0) {
+                self.advance_ip(1, soup.len);
+                return ExecResult.none;
+            }
+
+            const skip_address = wrap_increment(self.ip, 1, soup.len);
+            const skip_instruction = soup.read(skip_address);
+
+            switch (skip_instruction) {
+                Instruction.jmp, Instruction.jmpb, Instruction.call, Instruction.adr, Instruction.adrb, Instruction.adrf => {
+                    const template_start = wrap_increment(skip_address, 1, soup.len);
+                    const template_length = count_nops_at(soup, template_start, soup.len) orelse 0;
+                    self.ip = wrap_increment(template_start, template_length, soup.len);
+                },
+                else => {
+                    self.ip = wrap_increment(skip_address, 1, soup.len);
+                },
+            }
+
+            return ExecResult.none;
+        }
     };
 }
 
 test "stack overflow" {
-    var cpu = CPU(5){};
+    var cpu = CPU(5, 500){};
 
     for (0..5) |i| {
         try cpu.push(@intCast(i));
@@ -245,7 +272,7 @@ test "stack overflow" {
 }
 
 test "stack underflow" {
-    var cpu = CPU(5){};
+    var cpu = CPU(5, 500){};
 
     try cpu.push(1);
     _ = try cpu.pop();
@@ -255,7 +282,7 @@ test "stack underflow" {
 }
 
 test "push pop roundtrip" {
-    var cpu = CPU(5){};
+    var cpu = CPU(5, 500){};
 
     try cpu.push(1);
     try cpu.push(2);
@@ -263,6 +290,14 @@ test "push pop roundtrip" {
     try testing.expectEqual(2, cpu.pop());
     try testing.expectEqual(1, cpu.pop());
     try testing.expectEqual(0, cpu.fl);
+}
+
+test "advance ip uses wrapped address" {
+    var cpu = CPU(5, 500){ .ip = 99 };
+
+    cpu.advance_ip(2, 100);
+
+    try testing.expectEqual(1, cpu.ip);
 }
 
 //

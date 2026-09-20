@@ -271,6 +271,7 @@ limits may still be useful for tests or experiments.
 - `execute(cpu: *Cpu, instruction: Instruction, soup: *Soup, creature: *Creature) ExecResult`
 - `step(cpu: *Cpu, soup: *Soup, creature: *Creature) ExecResult`
 - `advance_ip(increment: u16, soup_len: u16)` — overflow-safe `ip` advance, no promotion needed
+- `wrap(address: u16, increment: u16, soup_len: u16) u16` — reusable overflow-safe address advance
 - Implement all 32 instruction handlers, each taking `soup_len: u16` for `ip` updates:
   - e.g. `nop(cpu: *Cpu, soup_len: u16)`, `or1(cpu: *Cpu, soup_len: u16)`, ...
   - arithmetic/register ops
@@ -305,7 +306,7 @@ limits may still be useful for tests or experiments.
 step(cpu, soup, creature):
     # 1. Fetch. All address arithmetic wraps modulo soup length,
     #    so the soup behaves as a circular arena.
-    raw = soup.read(wrap(cpu.ip))
+    raw = soup.read(wrap(cpu.ip, 0, soup.len))
 
     # 2. Empty cell. Only reachable if the soup type models
     #    uninitialized cells as null (the paper's soup is always
@@ -344,33 +345,61 @@ execute(cpu, instruction, soup, creature):
         # push/pop itself): still default-advance past the failing
         # instruction, return error_condition.
 
-        # if_cz: conditional skip.
-        #     if cpu.cx == 0: cpu.advance_ip(1, soup.len)   # run next instr
-        #     else: skip one instruction AND its template, if any:
-        #         target = wrap(cpu.ip + 1)
-        #         if soup cell at target starts a template-user
-        #         (jmp, jmpb, call, adr, adrb, adrf):
-        #             target = skip_template(soup, target)
+        # if_cz: conditionally execute or skip the next logical instruction.
+        #     if cpu.cx == 0:
+        #         # Do not execute the next instruction inside this handler.
+        #         # Move to it so the next step fetches and executes it normally.
+        #         cpu.advance_ip(1, soup.len)
+        #         return none
+        #
+        #     skipped_addr = wrap(cpu.ip, 1, soup.len)
+        #     skipped_cell = soup.read(skipped_addr)
+        #
+        #     if skipped_cell is empty:
+        #         # The empty cell is skipped rather than fetched, so if_cz does
+        #         # not set fl or return error_condition for that cell.
+        #         cpu.ip = wrap(skipped_addr, 1, soup.len)
+        #         return none
+        #
+        #     skipped_instruction = decode(skipped_cell)
+        #     switch skipped_instruction:
+        #         jmp, jmpb, call, adr, adrb, adrf:
+        #             # These instructions consume the consecutive NOP cells
+        #             # immediately following them as an inline template operand.
+        #             # Reuse template.zig's existing NOP-pattern extraction
+        #             # logic (the logic used by pattern_length_at), but do not
+        #             # call search_forward/search_backward/search_bidirectional:
+        #             # those searches find a complementary target, while if_cz
+        #             # only skips the instruction and its own inline template.
+        #             cpu.ip = skip_template(soup, skipped_addr)
+        #
         #         else:
-        #             target = wrap(target + 1)
-        #         cpu.ip = target
+        #             # NOPs and all ordinary instructions occupy one cell when
+        #             # skipped. A NOP run is an operand only when it follows one
+        #             # of the template-using instructions listed above.
+        #             cpu.ip = wrap(skipped_addr, 1, soup.len)
+        #
+        #     # Skipping has no register, stack, soup, or flag side effects from
+        #     # the skipped instruction. In particular, skipped call does not
+        #     # push and skipped adr* does not write ax.
         #     return none
 
         # Jumps: jmp (bidirectional), jmpb (backward), call (bidirectional + push).
-        #     pattern_start = wrap(cpu.ip + 1)
+        #     pattern_start = wrap(cpu.ip, 1, soup.len)
         #     match = template.search_*(soup, pattern_start, search_limit)
         #     if match is null:
         #         cpu.fl = 1
         #         cpu.ip = skip_template(soup, cpu.ip)  # land past our own NOPs
         #         return error_condition
         #     if instruction is call:
-        #         try push(wrap(cpu.ip + 1 + template_len))  # return addr past our NOPs
+        #         return_addr = wrap(cpu.ip, 1, soup.len)
+        #         try push(wrap(return_addr, template_len, soup.len))  # past our NOPs
         #         on overflow: fl set, ip = skip_template, return error_condition
         #     cpu.ip = match   # match is already "after the complementary template"
         #     return none
 
         # ret:
-        #     on pop success: cpu.ip = wrap(popped_value); return none
+        #     on pop success: cpu.ip = wrap(popped_value, 0, soup.len); return none
         #     on StackUnderflow: fl set, default advance, return error_condition
 
         # Address-to-register: adr (bidirectional), adrb (backward), adrf (forward).
@@ -381,11 +410,11 @@ execute(cpu, instruction, soup, creature):
         # down the reaper queue; see Phase 3.)
 
         # mov_iab (copy with ownership check):
-        #     data = soup.read(wrap(cpu.bx))       # read is always allowed
+        #     data = soup.read(wrap(cpu.bx, 0, soup.len))       # read is always allowed
         #     if data is empty: fl = 1, default advance, return error_condition
-        #     try soup.write(wrap(cpu.ax), maybeCopyError(data), creature.id)
+        #     try soup.write(wrap(cpu.ax, 0, soup.len), maybeCopyError(data), creature.id)
         #     on WriteProtected: fl = 1, default advance, return error_condition
-        #     on success: cpu.ax = wrap(cpu.ax + 1); cpu.bx = wrap(cpu.bx + 1)
+        #     on success: cpu.ax = wrap(cpu.ax, 1, soup.len); cpu.bx = wrap(cpu.bx, 1, soup.len)
         #         creature.instructions_copied += 1
         #         cpu.advance_ip(1, soup.len)   # old_ip = ip on entry to mov_iab
         #         return none
@@ -414,16 +443,26 @@ advance_ip(increment, soup_len):
     if ip < threshold: ip += step
     else: ip -= threshold
 
-wrap(addr): addr mod soup.len   # for address reads (bx/ax/pattern_start),
-                                # ip itself always moves via advance_ip
+wrap(address, increment, soup_len):
+    # Overflow-safe address advance reusable for bx/ax/pattern_start.
+    # Assumes soup_len > 0; address may be outside the soup range.
+    normalized_address = address mod soup_len
+    step = increment mod soup_len
+    threshold = soup_len - step
+    if normalized_address < threshold: return normalized_address + step
+    else: return normalized_address - threshold
+    # ip itself always moves via advance_ip
 
 skip_template(soup, instr_addr):
     # Width of "this instruction plus its trailing NOP template", or 1
     # when the next cell is not a NOP. Used both for landing past our own
     # template after a failed search and for if_cz skipping over a
     # template-user plus its NOPs.
-    length = count of consecutive NOP cells starting at wrap(instr_addr + 1)
-    return wrap(instr_addr + 1 + length)
+    template_start = wrap(instr_addr, 1, soup.len)
+    # Reuse the same wrapped consecutive-NOP extraction used by
+    # template.zig's pattern_length_at. Do not perform a complementary search.
+    length = template pattern length at template_start, or 0 when it is not a NOP
+    return wrap(template_start, length, soup.len)
 ```
 
 **Flag and counter ownership (who writes what):**

@@ -29,7 +29,7 @@ pub fn Soup(comptime size: u16) type {
 
         memory: [size]?Instruction = .{null} ** size,
         owner: [size]?CreatureId = .{null} ** size,
-        len: u16 = size,
+        comptime len: u16 = size,
 
         pub fn read(self: *const Self, address: u16) ?Instruction {
             return self.memory[address];
