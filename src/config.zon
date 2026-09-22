@@ -4,7 +4,7 @@
     // Per-creature stack depth.
     .stack_depth = 10,
     // Maximum distance for template searches.
-    .search_limit = 500,
+    .search_limit = 300,
     // `true` to enable linage tracing through evolution.
     .lineage_enabled = true,
     // `true` to enable soup visualizer.

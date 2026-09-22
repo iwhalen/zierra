@@ -12,6 +12,8 @@ const Allocation = soup_module.Allocation;
 const template_module = @import("template.zig");
 const count_nops_at = template_module.count_nops_at;
 const wrap_increment = template_module.wrap_increment;
+const search_bidirectional = template_module.search_bidirectional;
+const pattern_length_at = template_module.pattern_length_at;
 
 pub const StackError = error{ StackOverflow, StackUnderflow };
 pub const ExecutionError = error{NullInstructionError};
@@ -32,8 +34,6 @@ pub const ExecResult = union(enum) {
 };
 
 pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
-    _ = search_limit;
-
     if (comptime stack_depth <= 0) {
         @compileError("Stack depth must be positive.");
     }
@@ -132,6 +132,10 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                 // Conditional skip
                 Instruction.if_cz => return self.if_cz(soup),
                 // Jumps
+                Instruction.jmp => return self.jmp(soup),
+                Instruction.jmpb => return self.jmpb(soup),
+                Instruction.call => return self.call(soup),
+                Instruction.ret => return self.ret(soup.len),
                 // Address to register
                 // Copy
                 // Allocation
@@ -255,6 +259,27 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                 },
             }
 
+            return ExecResult.none;
+        }
+
+        pub fn jmp(self: *Self, soup: anytype) ExecResult {
+            const search_start = wrap_increment(self.ip, 1, soup.len);
+            const pattern_length = pattern_length_at(soup, search_start, search_limit) orelse 0;
+
+            if (pattern_length == 0) {
+                self.ip = wrap_increment(self.bx, 0, soup.len);
+                return ExecResult.none;
+            }
+
+            const search_result = search_bidirectional(soup, search_start, search_limit);
+
+            if (search_result == null) {
+                self.advance_ip(1 + pattern_length, soup.len);
+                self.fl = 1;
+                return ExecResult.error_condition;
+            }
+
+            self.ip = search_result.?;
             return ExecResult.none;
         }
     };

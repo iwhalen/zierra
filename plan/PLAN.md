@@ -385,18 +385,65 @@ execute(cpu, instruction, soup, creature):
         #     return none
 
         # Jumps: jmp (bidirectional), jmpb (backward), call (bidirectional + push).
+        # Shared mechanics; the variants differ only in search direction and
+        # in whether call pushes a return address.
+        #
+        # 1. Operand: the consecutive NOP run after this instruction is data,
+        #    never fetched and executed.
         #     pattern_start = wrap(cpu.ip, 1, soup.len)
-        #     match = template.search_*(soup, pattern_start, search_limit)
-        #     if match is null:
-        #         cpu.fl = 1
-        #         cpu.ip = skip_template(soup, cpu.ip)  # land past our own NOPs
-        #         return error_condition
-        #     if instruction is call:
-        #         return_addr = wrap(cpu.ip, 1, soup.len)
-        #         try push(wrap(return_addr, template_len, soup.len))  # past our NOPs
-        #         on overflow: fl set, ip = skip_template, return error_condition
-        #     cpu.ip = match   # match is already "after the complementary template"
-        #     return none
+        #     pattern_len = NOP run length at pattern_start
+        #
+        # 2. Search for the nearest complementary template within
+        #    config.search_limit, wrapping modulo soup length. The operand
+        #    itself is excluded: the forward scan begins one cell past the
+        #    last operand NOP, the backward scan pattern_len + 1 cells below
+        #    pattern_start (candidates are read in forward order, so a
+        #    backward candidate always ends below the operand). Both scans
+        #    advance one cell per round against one shared step counter; if
+        #    both match in the same round, jmp/call prefer the forward match
+        #    and jmpb the backward match.
+        #     match = jmpb ? template.searchBackward(soup, pattern_start, limit)
+        #                   : template.searchBidirectional(soup, pattern_start, limit)
+        #     # match is the address AFTER the complementary template
+        #
+        # 3. No match: the jump is ignored and
+        #    execution falls through past our own operand
+        #     cpu.fl = 1
+        #     cpu.ip = skip_template(soup, cpu.ip)  # width 1 when no NOPs
+        #     return error_condition
+        #
+        # 4. Empty operand (pattern_len == 0): not an error; the template
+        #    degenerates to register-indirect addressing through bx.
+        #     jmp/jmpb: cpu.ip = wrap(cpu.bx, 0, soup.len); return none
+        #     call: return_addr = wrap(cpu.ip, 1, soup.len)  # next cell is
+        #                # both target and return address: push-only no-op
+        #         push(return_addr)
+        #         on overflow: fl set, default advance, return error_condition
+        #         cpu.ip = return_addr; return none
+        #    (adr with an empty operand is likewise a harmless no-op)
+        #
+        # 5. call with a match: push the return address (first cell past our
+        #    own operand), after the search succeeds -- a failed call pushes
+        #    nothing.
+        #     return_addr = skip_template(soup, cpu.ip)
+        #     push(return_addr)
+        #     on overflow: fl set, ip = skip_template, return error_condition
+        #         # stack full: the call is ignored, no jump happens
+        #
+        # 6. Land: cpu.ip = match; return none. (execute owns ip; step never
+        #    re-increments it, so the next fetch is at the target)
+        #
+        # Notes:
+        # - Success touches only ip (the original also clears fl on every
+        #   successful instruction, jumps included). Jumps are never
+        #   hard_instruction_success.
+        # - Targets may lie inside other creatures' code: read and execute
+        #   privileges are unprotected, only write is.
+        # - Self-complementary operands are legal; a jump may land back
+        #   inside the creature that jumped.
+        # - The original applies the execution-flaw hook to found target
+        #   addresses and pushed return addresses; zierra keeps flaws in
+        #   the arithmetic handlers only (see Phase 4).
 
         # ret:
         #     on pop success: cpu.ip = wrap(popped_value, 0, soup.len); return none
@@ -486,6 +533,11 @@ skip_template(soup, instr_addr):
 - Jump/call land on the address *after* the complementary template; failed
   search sets `fl`, lands past the instruction's own NOPs, returns
   `error_condition`
+- `jmp` with an empty operand (next cell is not a NOP) jumps to `bx` without
+  setting `fl`; an empty `call` pushes the next address and continues there
+- Failed `call` (no match or stack overflow) pushes nothing and does not jump
+- `jmpb` finds a match located below the jump but never scans forward past
+  its own operand template
 - `if_cz` with `cx != 0` skips a plain instruction (width 1) and skips a
   template-user plus its NOPs (width 1 + template length)
 - `call` pushes the return address past its own template; `ret` pops it back
@@ -1012,6 +1064,8 @@ template.searchBidirectional(soup: *const Soup, start: u16, limit: u16) → ?u16
 - `start` points to the instruction *after* the addressing instruction (i.e., the first NOP of the template)
 - `limit` is `config.search_limit` — max distance to search
 - The function reads NOPs starting at `start` to build the template pattern, then searches for the complement
+- The search never matches the operand template itself: the forward scan starts past the last operand NOP and the backward scan starts before it (exact offsets in the jump pseudo-code above). A candidate template is read in forward order at every position, including the backward search
+- Complement means opposite NOP at each position: with `nop0 = 0` and `nop1 = 1`, position `i` matches when `operand[i] + candidate[i] == 1`
 
 **Output contract:**
 
