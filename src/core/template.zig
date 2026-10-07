@@ -173,6 +173,8 @@ test "wrap increment" {
     try testing.expectEqual(1, wrap_increment(65535, 1, 65535));
     try testing.expectEqual(0, wrap_increment(50000, 15535, 65535));
     try testing.expectEqual(50000, wrap_increment(50000, 60000, 60000));
+    try testing.expectEqual(1, wrap_increment(1, 0, 60000));
+    try testing.expectEqual(1, wrap_increment(11, 0, 10));
 }
 
 test "wrap decrement" {

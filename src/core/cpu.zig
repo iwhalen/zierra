@@ -73,7 +73,6 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
 
             self.stack[self.sp] = value;
             self.sp += 1;
-            self.fl = 0;
         }
 
         pub fn pop(self: *Self) StackError!u16 {
@@ -83,7 +82,6 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             }
 
             self.sp -= 1;
-            self.fl = 0;
             return self.stack[self.sp];
         }
 
@@ -106,6 +104,8 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
 
         pub fn execute(self: *Self, instruction: Instruction, soup: anytype, creature: anytype) ExecResult {
             _ = creature;
+
+            self.fl = 0;
 
             switch (instruction) {
                 // Plain register operations and no ops
@@ -138,9 +138,15 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                 Instruction.call => return self.call(soup),
                 Instruction.ret => return self.ret(soup.len),
                 // Address to register
+                Instruction.adr => unreachable,
+                Instruction.adrb => unreachable,
+                Instruction.adrf => unreachable,
                 // Copy
+                Instruction.mov_iab => unreachable,
                 // Allocation
+                Instruction.mal => unreachable,
                 // Divide
+                Instruction.divide => unreachable,
             }
         }
 
@@ -264,8 +270,6 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
         }
 
         pub fn execute_jump(self: *Self, soup: anytype, comptime search_fn: anytype) ExecResult {
-            self.fl = 0;
-
             const search_start = wrap_increment(self.ip, 1, soup.len);
             const pattern_length = pattern_length_at(soup, search_start);
 
@@ -302,6 +306,64 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
 
         pub fn jmpb(self: *Self, soup: anytype) ExecResult {
             return execute_jump(self, soup, search_backward);
+        }
+
+        pub fn call(self: *Self, soup: anytype) ExecResult {
+            const search_start = wrap_increment(self.ip, 1, soup.len);
+            const pattern_length = pattern_length_at(soup, search_start);
+
+            // Operand is invalid, continue on and set error condition.
+            if (pattern_length == null) {
+                self.advance_ip(1, soup.len);
+                self.fl = 1;
+                return ExecResult.error_condition;
+            }
+
+            const return_address = wrap_increment(search_start, pattern_length.?, soup.len);
+
+            // Operand is empty...
+            if (pattern_length == 0) {
+
+                // ... attempt to push return address.
+                self.push(return_address) catch {
+                    // Stack was too full to push return address.
+                    self.ip = return_address;
+                    self.fl = 1;
+                    return ExecResult.error_condition;
+                };
+
+                self.ip = return_address;
+                return ExecResult.none;
+            }
+
+            const search_result = search_bidirectional(soup, search_start, search_limit);
+
+            // Search found nothing, continue and set error condition.
+            if (search_result == null) {
+                self.ip = return_address;
+                self.fl = 1;
+                return ExecResult.error_condition;
+            }
+
+            self.push(return_address) catch {
+                // Stack was too full to push return address.
+                self.ip = return_address;
+                self.fl = 1;
+                return ExecResult.error_condition;
+            };
+
+            self.ip = search_result.?;
+            return ExecResult.none;
+        }
+
+        pub fn ret(self: *Self, soup_len: u16) ExecResult {
+            const address = self.pop() catch {
+                self.advance_ip(1, soup_len);
+                return ExecResult.error_condition;
+            };
+
+            self.ip = wrap_increment(address, 0, soup_len);
+            return ExecResult.none;
         }
     };
 }
