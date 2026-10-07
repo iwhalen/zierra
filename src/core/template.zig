@@ -42,17 +42,29 @@ pub fn count_nops_at(soup: anytype, start: u16, limit: u16) u16 {
     return nops;
 }
 
-pub fn pattern_length_at(soup: anytype, start: u16, limit: u16) ?u16 {
-    const length = count_nops_at(soup, start, limit);
+// Zero means empty; null means no terminating cell was found in one traversal.
+pub fn pattern_length_at(soup: anytype, start: u16) ?u16 {
+    const length = count_nops_at(soup, start, soup.len);
+    return if (length == soup.len) null else length;
+}
 
-    if (length >= limit / 2) {
-        return null;
+fn candidate_overlaps_operand(candidate_start: u16, pattern_start: u16, pattern_length: u16, soup_len: u16) bool {
+    const instruction_addr = wrap_decrement(pattern_start, 1, soup_len);
+    var offset: u16 = 0;
+
+    while (offset < pattern_length) : (offset += 1) {
+        const candidate_addr = wrap_increment(candidate_start, offset, soup_len);
+        if (forward_distance(instruction_addr, candidate_addr, soup_len) <= pattern_length) {
+            return true;
+        }
     }
 
-    return length;
+    return false;
 }
 
 fn matches_complement_at(soup: anytype, pattern_start: u16, pattern_length: u16, candidate_start: u16) bool {
+    if (candidate_overlaps_operand(candidate_start, pattern_start, pattern_length, soup.len)) return false;
+
     var offset: u16 = 0;
 
     while (offset < pattern_length) {
@@ -70,8 +82,8 @@ fn matches_complement_at(soup: anytype, pattern_start: u16, pattern_length: u16,
 }
 
 pub fn search_forward(soup: anytype, start: u16, limit: u16) ?u16 {
-    const pattern_length = pattern_length_at(soup, start, limit) orelse return null;
-    if (pattern_length == 0) return null;
+    const pattern_length = pattern_length_at(soup, start) orelse return null;
+    if (pattern_length == 0 or limit == 0) return null;
 
     const match_start = search_forward_match(soup, start, pattern_length, limit) orelse return null;
 
@@ -81,8 +93,9 @@ pub fn search_forward(soup: anytype, start: u16, limit: u16) ?u16 {
 fn search_forward_match(soup: anytype, start: u16, pattern_length: u16, limit: u16) ?u16 {
     var search_addr = wrap_increment(start, pattern_length, soup.len);
     var search_count: u16 = 0;
+    const rounds = @min(limit, soup.len);
 
-    while (search_count < limit) {
+    while (search_count < rounds) {
         if (matches_complement_at(soup, start, pattern_length, search_addr)) {
             return search_addr;
         }
@@ -95,8 +108,8 @@ fn search_forward_match(soup: anytype, start: u16, pattern_length: u16, limit: u
 }
 
 pub fn search_backward(soup: anytype, start: u16, limit: u16) ?u16 {
-    const pattern_length = pattern_length_at(soup, start, limit) orelse return null;
-    if (pattern_length == 0) return null;
+    const pattern_length = pattern_length_at(soup, start) orelse return null;
+    if (pattern_length == 0 or limit == 0) return null;
 
     const match_start = search_backward_match(soup, start, pattern_length, limit) orelse return null;
 
@@ -107,8 +120,9 @@ fn search_backward_match(soup: anytype, start: u16, pattern_length: u16, limit: 
     const instruction_addr = wrap_decrement(start, 1, soup.len);
     var search_addr = wrap_decrement(instruction_addr, pattern_length, soup.len);
     var search_count: u16 = 0;
+    const rounds = @min(limit, soup.len);
 
-    while (search_count < limit) {
+    while (search_count < rounds) {
         if (matches_complement_at(soup, start, pattern_length, search_addr)) {
             return search_addr;
         }
@@ -124,37 +138,30 @@ fn forward_distance(from: u16, to: u16, maximum: u16) u16 {
     return if (to >= from) to - from else (maximum - from) + to;
 }
 
-fn backward_distance(from: u16, to: u16, maximum: u16) u16 {
-    return if (from >= to) from - to else (maximum - to) + from;
-}
-
+// Check paired candidates by round; forward wins a match in the same round.
 pub fn search_bidirectional(soup: anytype, start: u16, limit: u16) ?u16 {
-    const pattern_length = pattern_length_at(soup, start, limit) orelse return null;
-    if (pattern_length == 0) return null;
-
-    const forward_match = search_forward_match(soup, start, pattern_length, limit);
-    const backward_match = search_backward_match(soup, start, pattern_length, limit);
-
-    if (forward_match == null and backward_match == null) {
-        return null;
-    }
-
-    if (forward_match == null) {
-        return wrap_increment(backward_match.?, pattern_length, soup.len);
-    }
-
-    if (backward_match == null) {
-        return wrap_increment(forward_match.?, pattern_length, soup.len);
-    }
+    const pattern_length = pattern_length_at(soup, start) orelse return null;
+    if (pattern_length == 0 or limit == 0) return null;
 
     const instruction_addr = wrap_decrement(start, 1, soup.len);
-    const backward_match_end = wrap_increment(backward_match.?, pattern_length - 1, soup.len);
+    var forward_addr = wrap_increment(start, pattern_length, soup.len);
+    var backward_addr = wrap_decrement(instruction_addr, pattern_length, soup.len);
+    var search_count: u16 = 0;
+    const rounds = @min(limit, soup.len);
 
-    if (forward_distance(instruction_addr, forward_match.?, soup.len) < backward_distance(instruction_addr, backward_match_end, soup.len)) {
-        return wrap_increment(forward_match.?, pattern_length, soup.len);
-    } else {
-        return wrap_increment(backward_match.?, pattern_length, soup.len);
+    while (search_count < rounds) : (search_count += 1) {
+        if (matches_complement_at(soup, start, pattern_length, forward_addr)) {
+            return wrap_increment(forward_addr, pattern_length, soup.len);
+        }
+        if (matches_complement_at(soup, start, pattern_length, backward_addr)) {
+            return wrap_increment(backward_addr, pattern_length, soup.len);
+        }
+
+        forward_addr = wrap_increment(forward_addr, 1, soup.len);
+        backward_addr = wrap_decrement(backward_addr, 1, soup.len);
     }
+
+    return null;
 }
 
 test "wrap increment" {
@@ -195,7 +202,8 @@ test "search forward" {
     try testing.expectEqual(0, search_forward(&soup_simple, 1, 100));
 
     // Pattern outside limit.
-    try testing.expectEqual(null, search_forward(&soup_simple, 1, 3));
+    try testing.expectEqual(null, search_forward(&soup_simple, 1, 2));
+    try testing.expectEqual(0, search_forward(&soup_simple, 1, 3));
 
     // Pattern not found.
     soup_simple.memory = .{
@@ -227,7 +235,7 @@ test "search forward wrap around" {
 
     try testing.expectEqual(3, search_forward(&soup_simple, 5, 100));
 
-    // Pattern outside limit.
+    // No operand at this address.
     try testing.expectEqual(null, search_forward(&soup_simple, 3, 3));
 
     // Pattern not found.
@@ -268,7 +276,8 @@ test "search backward" {
     try testing.expectEqual(4, search_backward(&soup_simple, 10, 100));
 
     // Pattern outside limit.
-    try testing.expectEqual(null, search_backward(&soup_simple, 10, 7));
+    try testing.expectEqual(null, search_backward(&soup_simple, 10, 5));
+    try testing.expectEqual(4, search_backward(&soup_simple, 10, 6));
 
     // Pattern not found.
     soup_simple.memory = .{
@@ -326,18 +335,18 @@ test "search bidirectional" {
     };
 
     try testing.expectEqual(3, search_bidirectional(soup_simple, 5, 100));
-    try testing.expectEqual(11, search_bidirectional(soup_simple, 1, 100));
+    try testing.expectEqual(7, search_bidirectional(soup_simple, 1, 100));
 }
 
 test "pattern length distinguishes empty valid and invalid operands" {
     var soup = Soup(5){};
     soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.nop_1, Instruction.inc_a, null };
 
-    try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, 3, 100));
-    try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, 4, 100));
-    try testing.expectEqual(@as(?u16, 2), pattern_length_at(&soup, 1, 100));
-    // The current extraction rule rejects lengths at least half the limit.
-    try testing.expectEqual(@as(?u16, null), pattern_length_at(&soup, 1, 4));
+    try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, 3));
+    try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, 4));
+    try testing.expectEqual(@as(?u16, 2), pattern_length_at(&soup, 1));
+    soup.memory = .{Instruction.nop_0} ** 5;
+    try testing.expectEqual(@as(?u16, null), pattern_length_at(&soup, 1));
 }
 
 test "searches reject empty operands" {
@@ -345,7 +354,7 @@ test "searches reject empty operands" {
     soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.nop_1, Instruction.inc_a, Instruction.nop_1, Instruction.nop_0, null };
 
     for ([_]u16{ 0, 3, 6 }) |start| {
-        try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, start, 100));
+        try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, start));
         try testing.expectEqual(@as(?u16, null), search_forward(&soup, start, 100));
         try testing.expectEqual(@as(?u16, null), search_backward(&soup, start, 100));
         try testing.expectEqual(@as(?u16, null), search_bidirectional(&soup, start, 100));
@@ -359,4 +368,109 @@ test "searches with zero budget return no match" {
     try testing.expectEqual(@as(?u16, null), search_forward(&soup, 1, 0));
     try testing.expectEqual(@as(?u16, null), search_backward(&soup, 1, 0));
     try testing.expectEqual(@as(?u16, null), search_bidirectional(&soup, 1, 0));
+}
+
+test "extraction preserves long wrapped operands" {
+    var soup = Soup(7){};
+    soup.memory = .{ Instruction.nop_1, Instruction.nop_0, Instruction.inc_a, Instruction.jmp, Instruction.nop_0, Instruction.nop_1, Instruction.nop_0 };
+
+    try testing.expectEqual(@as(?u16, 5), pattern_length_at(&soup, 4));
+}
+
+test "short budgets count candidates rather than operand cells" {
+    var soup = Soup(7){};
+    soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.inc_a, Instruction.nop_1, Instruction.inc_a, Instruction.inc_a, Instruction.nop_1 };
+
+    // The first forward candidate is the instruction terminating the operand.
+    try testing.expectEqual(@as(?u16, null), search_forward(&soup, 1, 1));
+    try testing.expectEqual(@as(?u16, 4), search_forward(&soup, 1, 2));
+    try testing.expectEqual(@as(?u16, 0), search_backward(&soup, 1, 1));
+    try testing.expectEqual(@as(?u16, 0), search_bidirectional(&soup, 1, 1));
+}
+
+test "bidirectional search selects the earliest round and prefers forward ties" {
+    var soup = Soup(9){};
+    soup.memory = .{Instruction.inc_a} ** 9;
+    soup.memory[4] = Instruction.jmp;
+    soup.memory[5] = Instruction.nop_0;
+    soup.memory[7] = Instruction.nop_1;
+    soup.memory[2] = Instruction.nop_1;
+
+    // Both directions match in the second round, after the initial candidates.
+    try testing.expectEqual(@as(?u16, null), search_bidirectional(&soup, 5, 1));
+    try testing.expectEqual(@as(?u16, 8), search_bidirectional(&soup, 5, 2));
+
+    // Move the backward match one round later; forward still wins.
+    soup.memory[2] = Instruction.inc_a;
+    soup.memory[1] = Instruction.nop_1;
+    try testing.expectEqual(@as(?u16, 8), search_bidirectional(&soup, 5, 3));
+
+    // Move it to the first round; backward now wins.
+    soup.memory[1] = Instruction.inc_a;
+    soup.memory[3] = Instruction.nop_1;
+    try testing.expectEqual(@as(?u16, 4), search_bidirectional(&soup, 5, 3));
+}
+
+test "bidirectional forward tie priority survives address wrapping" {
+    var soup = Soup(9){};
+    soup.memory = .{Instruction.inc_a} ** 9;
+    soup.memory[7] = Instruction.jmp;
+    soup.memory[8] = Instruction.nop_0;
+    soup.memory[1] = Instruction.nop_1;
+    soup.memory[5] = Instruction.nop_1;
+
+    try testing.expectEqual(@as(?u16, 2), search_bidirectional(&soup, 8, 2));
+    try testing.expectEqual(@as(?u16, 6), search_backward(&soup, 8, 2));
+}
+
+test "candidate overlap includes the instruction and wrapped operand" {
+    // Operand cells 5, 6, 0 follow the instruction at 4. Only candidate 1
+    // occupies three cells entirely outside that protected range.
+    try testing.expect(!candidate_overlaps_operand(1, 5, 3, 7));
+    for ([_]u16{ 0, 2, 3, 4, 5, 6 }) |candidate| {
+        try testing.expect(candidate_overlaps_operand(candidate, 5, 3, 7));
+    }
+
+    // Synthetic input: the complementary sequence at 0 spans the protected
+    // instruction address 1. Reject it even when that address contains a NOP.
+    var soup = Soup(7){};
+    soup.memory = .{ Instruction.nop_1, Instruction.nop_1, Instruction.nop_0, Instruction.nop_0, Instruction.inc_a, Instruction.inc_a, Instruction.jmp };
+    try testing.expectEqual(@as(?u16, null), search_forward(&soup, 2, 4));
+    try testing.expectEqual(@as(?u16, null), search_backward(&soup, 2, 100));
+    try testing.expectEqual(@as(?u16, null), search_bidirectional(&soup, 2, 100));
+}
+
+const CountingSoup = struct {
+    comptime len: u16 = 7,
+    memory: [7]?Instruction = .{Instruction.inc_a} ** 7,
+    reads: usize = 0,
+
+    pub fn read(self: *@This(), address: u16) ?Instruction {
+        self.reads += 1;
+        return self.memory[address];
+    }
+};
+
+test "all NOP extraction reads exactly one traversal" {
+    var soup = CountingSoup{ .memory = .{Instruction.nop_0} ** 7 };
+
+    try testing.expectEqual(@as(?u16, null), pattern_length_at(&soup, 5));
+    try testing.expectEqual(@as(usize, 7), soup.reads);
+    inline for (.{ search_forward, search_backward, search_bidirectional }) |search_fn| {
+        try testing.expectEqual(@as(?u16, null), search_fn(&soup, 5, 100));
+    }
+}
+
+test "search budgets beyond one traversal do not repeat candidates" {
+    inline for (.{ search_forward, search_backward, search_bidirectional }) |search_fn| {
+        var soup = CountingSoup{};
+        soup.memory[0] = Instruction.jmp;
+        soup.memory[1] = Instruction.nop_0;
+
+        try testing.expectEqual(@as(?u16, null), search_fn(&soup, 1, soup.len));
+        const single_traversal_reads = soup.reads;
+        soup.reads = 0;
+        try testing.expectEqual(@as(?u16, null), search_fn(&soup, 1, 65535));
+        try testing.expectEqual(single_traversal_reads, soup.reads);
+    }
 }

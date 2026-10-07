@@ -267,7 +267,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             self.fl = 0;
 
             const search_start = wrap_increment(self.ip, 1, soup.len);
-            const pattern_length = pattern_length_at(soup, search_start, search_limit);
+            const pattern_length = pattern_length_at(soup, search_start);
 
             // No NOPs were found, so we jump to the address in bx.
             if (pattern_length == 0) {
@@ -278,7 +278,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             // Invalid pattern found, skip the operand.
             if (pattern_length == null) {
                 const operand_length = count_nops_at(soup, search_start, soup.len);
-                self.advance_ip(1 + operand_length, soup.len);
+                self.ip = wrap_increment(search_start, operand_length, soup.len);
                 self.fl = 1;
                 return ExecResult.error_condition;
             }
@@ -287,7 +287,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
 
             // No matching template found, skip the operand.
             if (search_result == null) {
-                self.advance_ip(1 + pattern_length.?, soup.len);
+                self.ip = wrap_increment(search_start, pattern_length.?, soup.len);
                 self.fl = 1;
                 return ExecResult.error_condition;
             }
@@ -350,21 +350,21 @@ test "advance ip uses wrapped address" {
 // Disgusting AI generated unit tests.
 //
 
-// TODO
-
 test "empty jumps use normalized bx and clear the error flag" {
     var soup = Soup(7){};
     soup.memory[0] = Instruction.inc_a;
     soup.memory[6] = Instruction.jmp;
 
-    inline for (.{ false, true }) |backward| {
-        var cpu = CPU(5, 100){ .ip = 6, .bx = 17, .fl = 1 };
-        const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+    inline for (.{ 0, 1, 100 }) |budget| {
+        inline for (.{ false, true }) |backward| {
+            var cpu = CPU(5, budget){ .ip = 6, .bx = 17, .fl = 1 };
+            const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
 
-        try testing.expect(result == .none);
-        try testing.expectEqual(@as(u16, 3), cpu.ip);
-        try testing.expectEqual(@as(u8, 0), cpu.fl);
-        try testing.expectEqual(@as(u16, 17), cpu.bx);
+            try testing.expect(result == .none);
+            try testing.expectEqual(@as(u16, 3), cpu.ip);
+            try testing.expectEqual(@as(u8, 0), cpu.fl);
+            try testing.expectEqual(@as(u16, 17), cpu.bx);
+        }
     }
 }
 
@@ -380,5 +380,78 @@ test "failed jumps skip a nonempty operand and set the error flag" {
         try testing.expectEqual(@as(u16, 3), cpu.ip);
         try testing.expectEqual(@as(u8, 1), cpu.fl);
         try testing.expectEqual(@as(u16, 5), cpu.bx);
+    }
+}
+
+test "jump direction chooses the appropriate successful match" {
+    var soup = Soup(9){};
+    soup.memory = .{Instruction.inc_a} ** 9;
+    soup.memory[4] = Instruction.jmp;
+    soup.memory[5] = Instruction.nop_0;
+    soup.memory[7] = Instruction.nop_1;
+    soup.memory[1] = Instruction.nop_1;
+
+    inline for (.{ false, true }) |backward| {
+        var cpu = CPU(5, 3){ .ip = 4, .bx = 42, .fl = 1 };
+        const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+
+        try testing.expect(result == .none);
+        try testing.expectEqual(@as(u16, if (backward) 2 else 8), cpu.ip);
+        try testing.expectEqual(@as(u8, 0), cpu.fl);
+        try testing.expectEqual(@as(u16, 42), cpu.bx);
+    }
+}
+
+test "successful jumps handle a wrapped forward target and equal round matches" {
+    var soup = Soup(9){};
+    soup.memory = .{Instruction.inc_a} ** 9;
+    soup.memory[7] = Instruction.jmp;
+    soup.memory[8] = Instruction.nop_0;
+    soup.memory[1] = Instruction.nop_1;
+    soup.memory[5] = Instruction.nop_1;
+
+    inline for (.{ false, true }) |backward| {
+        var cpu = CPU(5, 2){ .ip = 7, .bx = 42, .fl = 1 };
+        const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+
+        try testing.expect(result == .none);
+        try testing.expectEqual(@as(u16, if (backward) 6 else 2), cpu.ip);
+        try testing.expectEqual(@as(u8, 0), cpu.fl);
+        try testing.expectEqual(@as(u16, 42), cpu.bx);
+    }
+}
+
+test "failed jumps skip the full wrapped operand even with short budgets" {
+    var soup = Soup(7){};
+    soup.memory = .{ Instruction.nop_0, Instruction.inc_a, Instruction.inc_a, Instruction.inc_a, Instruction.inc_a, Instruction.jmp, Instruction.nop_0 };
+
+    inline for (.{ 0, 1, 100 }) |budget| {
+        inline for (.{ false, true }) |backward| {
+            var cpu = CPU(5, budget){ .ip = 5, .bx = 3 };
+            const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+
+            try testing.expect(result == .error_condition);
+            try testing.expectEqual(@as(u16, 1), cpu.ip);
+            try testing.expectEqual(@as(u8, 1), cpu.fl);
+            try testing.expectEqual(@as(u16, 3), cpu.bx);
+        }
+    }
+}
+
+test "invalid all NOP jump input reports an error after a bounded traversal" {
+    // Synthetic helper input: an actual jump opcode would terminate the NOP run.
+    var soup = Soup(7){};
+    soup.memory = .{Instruction.nop_0} ** 7;
+
+    inline for (.{ 0, 100 }) |budget| {
+        inline for (.{ false, true }) |backward| {
+            var cpu = CPU(5, budget){ .ip = 5, .bx = 3 };
+            const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+
+            try testing.expect(result == .error_condition);
+            try testing.expectEqual(@as(u16, 6), cpu.ip);
+            try testing.expectEqual(@as(u8, 1), cpu.fl);
+            try testing.expectEqual(@as(u16, 3), cpu.bx);
+        }
     }
 }
