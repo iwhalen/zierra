@@ -1,1346 +1,851 @@
 # Zierra: High-Level Implementation Plan
 
+This project teaches Zig 0.16.0 by building a Tierra simulation in small, testable steps.
+The plan describes goals, contracts, and exercises; implementation remains the learner's work.
+Work through one checkpoint at a time, predict its behavior, and write a small test before
+connecting it to the next module.
+
+## How to Use This Plan
+
+- Checked items describe existing foundations, not a promise that an entire phase is finished.
+  New acceptance criteria remain unchecked until implemented and verified.
+- Module names and signatures describe intended boundaries. Adjust names while learning, but
+  keep their behavior consistent with the contracts below.
+- Establish mutation-free ancestor replication before adding evolution, persistence, or display.
+- Prefer a small working program over infrastructure built in anticipation of later phases.
+  Each phase ends with an observable result, which can initially be a test or textual trace.
+- The local paper is the source for Tierra behavior. Where it does not specify an edge case,
+  this plan labels the behavior as a Zierra convention instead of claiming historical fidelity.
+
+### References and Version Checks
+
+- [Tierra paper](../reference/tierra_paper.tex): operating-system sections for memory,
+  scheduling, reaping, and mutation; Appendix B for opcodes; Appendix C for the ancestor.
+- [Zig language reference](../reference/langref.html.in) and [standard library](../reference/std/):
+  documentation only; never modify this directory.
+- Confirm the compiler with `zig version`. If an API differs from the local reference,
+  inspect the standard library installed with Zig 0.16.0, located through `zig env`.
+- Ziglings exercises below are concept practice. This checkout includes examples written
+  for older Zig versions; adapt API usage to 0.16.0. In particular, the old async exercises
+  are not a prerequisite for persistence or display.
+
+### Current Foundations and Remaining Alignment
+
+The repository already contains instruction encoding, soup ownership/allocation helpers,
+CPU state and some handlers, a creature type, and template searches. The following work
+must still be treated as open rather than hidden by an earlier phase's completion mark:
+
+- `src/config.zon` exists, but the typed configuration/validation module is still planned.
+- Soup currently stores `?Instruction` and reads direct indices. The target below stores
+  raw bytes; changing representation is a separate learning checkpoint.
+- CPU and template helpers already wrap addresses. Circular execution does not require
+  allocations to cross the soup boundary.
+- Creature counters currently use `u16`, and its daughter allocation is not optional.
+  Align these with the lifecycle contract before long simulation runs.
+- CPU execution is incomplete. Existing search tests do not settle every search edge case.
+- The library root does not currently import the core modules. Wire their tests into
+  `zig build test` before treating that command as verification of the simulation.
+
+---
+
 ## Architecture Overview
 
-The simulation is divided into independent modules that mirror the conceptual layers of Tierra:
-the **instruction set**, the **virtual CPU**, the **memory soup**, the **creature manager**
-(reaper + slicer), the **mutation engine**, the **genebank/statistics**, and the **display layer**
-(notcurses). Each module has a clean public API and its own test suite.
+The simulation has these conceptual layers:
 
-The implementation should be **compile-time first**. Anything that defines the shape of the
-simulation is a comptime parameter or generated constant; only the evolutionary process itself is
-runtime state. In practice:
-
-- Soup capacity, address width assumptions, owner array shape, stack depth, instruction tables, template
-  limits, default config values, ancestor genome bytes, and feature toggles are known at compile time.
-  Shape and feature settings come from `src/config.zon` imported with `@import`, not from `zig build -D`
-  flags.
-- The soup's backing memory is allocated as fixed-size arrays inside a comptime-specialized type,
-  rather than heap-allocating the arena on startup.
-- Zig will still initialize mutable soup contents when the simulation starts; the compile-time win is
-  that capacity, storage layout, address assumptions, and bounds are known to the compiler.
-- Configuration comes from one `Config` object imported from `src/config.zon`. Fields that define
-  storage shape and fields that tune evolutionary behavior live together in that object.
-- The main simulation remains runtime behavior: creature birth/death, allocation occupancy, mutations,
-  scheduling, genebank growth, lineage output, and display state are all data that evolves while running.
-- Prefer factory functions like `Soup(comptime size: u16) type` and
-  `Simulation(comptime config: Config) type` when a module's storage or dispatch can be specialized.
-
+```text
+main / CLI
+    Simulation: lifecycle, counters, scheduling, mutation integration
+        Soup: bytes, ownership, allocation
+        Creature: CPU state, allocations, identity, counters
+        CPU: fetch, decode, execute, report lifecycle requests
+        Template search + instruction encoding
+    Genebank and statistics
+    Persistence: lineage, summaries, checkpoints
+    Optional display: notcurses
 ```
-┌─────────────────────────────────────────────────────┐
-│                    main.zig (CLI)                    │
-├─────────────────────────────────────────────────────┤
-│                  Simulation Engine                   │
-│  ┌───────────┐ ┌──────────┐ ┌─────────────────────┐ │
-│  │  Creature  │ │  Slicer  │ │      Reaper         │ │
-│  │  Manager   │ │  Queue   │ │      Queue          │ │
-│  └─────┬─────┘ └────┬─────┘ └──────────┬──────────┘ │
-│        │             │                  │            │
-│  ┌─────▼─────────────▼──────────────────▼──────────┐ │
-│  │                    Soup                          │ │
-│  │  (memory arena + allocation tracking)            │ │
-│  └─────────────────────┬────────────────────────────┘ │
-│                        │                             │
-│  ┌─────────────────────▼────────────────────────────┐ │
-│  │               Virtual CPU                        │ │
-│  │  (registers, stack, IP, fetch/decode/execute)    │ │
-│  └─────────────────────┬────────────────────────────┘ │
-│                        │                             │
-│  ┌─────────────────────▼────────────────────────────┐ │
-│  │             Instruction Set                      │ │
-│  │  (32 instructions, template matching)            │ │
-│  └──────────────────────────────────────────────────┘ │
-│                                                      │
-│  ┌──────────────┐  ┌──────────────┐                  │
-│  │   Mutation    │  │   Genebank   │                  │
-│  │   Engine      │  │   & Stats    │                  │
-│  └──────────────┘  └──────────────┘                  │
-├──────────────────────────────────────────────────────┤
-│              Display (notcurses C ABI)               │
-└──────────────────────────────────────────────────────┘
-```
+
+Keep the simulation single-threaded initially. The CPU does not import the scheduler,
+genebank, display, or simulation. A returned execution outcome lets the simulation
+complete lifecycle operations before another instruction executes.
+
+### Compile-Time Shape and Runtime State
+
+Use compile-time parameters for capacities, stack depth, instruction definitions,
+ancestor bytes, and optional features. Keep mutable soup contents, ownership, creatures,
+queues, RNG state, and statistics at runtime.
+
+Configuration comes from one typed object derived from `src/config.zon` through
+`@import`. Shape and behavior fields may live together; changing the production config
+means rebuilding. Tests can supply small configurations directly.
+
+Factory types such as `Soup(size)`, `CPU(stack_depth, search_limit)`, and
+`Simulation(config)` are useful where they clarify storage or behavior. Do not generalize
+every module before its needs are understood. A compile-time limit bounds runtime work;
+it does not require unrolling the loop or evaluating the simulation at compile time.
+
+Fixed arrays specify layout, not where an instance lives. A full simulation can be large;
+choose its storage deliberately rather than assuming returning it by value or putting
+multiple instances on the stack is free. Once queues or RNG interfaces hold internal
+pointers, initialize the object in its final location and avoid moving it.
+
+---
+
+## Shared Behavioral Contracts
+
+These rules are defined once here and referenced by the phases below.
+
+### Memory, Addresses, and Arithmetic
+
+- Target soup storage is one `u8` per instruction. Decode uses only bits `0..4`.
+  Copying, mutation output, genotype comparison, hashing, and serialization use canonical
+  values `0x00..0x1f`; upper padding bits do not create distinct genotypes.
+- Every soup cell has an instruction byte, including unowned cells. Initialize the soup
+  with seeded random canonical instructions when starting a simulation. Tiny tests may
+  use a deterministic fill. Ownership, rather than an optional instruction, determines
+  whether memory is allocated.
+- Freeing memory removes ownership and preserves its bytes, as described by the paper.
+  Allocating reserves ownership without clearing old code.
+- Read and execute privileges are unrestricted. A creature may write only cells owned
+  by its current slot ID: its mother allocation and, before division, its daughter allocation.
+  Cosmic rays are a separate privileged operation that can affect any soup cell.
+- CPU fetches, template traversal, and memory dereferences normalize addresses modulo
+  soup length. The soup's low-level read/write APIs require an already valid address;
+  they do not silently implement wrapping.
+- Allocations are linear contiguous ranges and never cross the end of the array.
+  An allocation is valid when `len > 0`, `start < soup_size`, and
+  `len <= soup_size - start`. Check this before indexing or changing state.
+- Addresses and allocation lengths use `u16`, allowing capacities `1..65535`,
+  not a capacity of 65536. Use `usize` or a wider integer for intermediate range
+  arithmetic when needed, and validate before narrowing. Do not add two `u16`
+  values first and widen an already-overflowed result.
+- Registers are 16-bit bit patterns. Define addition/subtraction as wrapping modulo
+  65536 and shifts as discarding bits beyond the register width. Normalize a register
+  modulo soup length when using it as an address. These are different operations:
+  register arithmetic must not accidentally wrap modulo soup length.
+- Long-lived instruction/copy counters and timestamps use `u64`; accumulated errors
+  use `u32`. Use a documented checked or saturating policy at their limits rather
+  than allowing Debug builds to trap unexpectedly during an ordinary run.
+
+Zierra's fixed-width registers and circular execution are explicit project conventions.
+The paper's C `int` register fields do not by themselves establish 16-bit arithmetic.
+
+### Ownership and Allocation Failure
+
+Use an ownership-aware allocation operation, conceptually
+`allocate(request_size, requester_id) -> Allocation or allocation error`.
+Use one consistent failure vocabulary throughout the modules; the existing soup names
+include `PermissionError`, `NoFreeSoup`, and `InvalidAllocation`.
+
+- Reject zero-size and oversized requests. Search all valid runs, including one ending
+  at the final cell and one occupying the entire soup.
+- Insufficient contiguous space is a normal virtual-machine failure, even when total
+  free memory is sufficient. The initial allocator uses deterministic first-fit scans.
+- Validate the entire range before inoculation, freeing, or ownership transfer.
+  Failed operations leave bytes, ownership, counters, and queues unchanged.
+- Free/transfer operations must verify the expected owner, so a stale handle cannot
+  release another creature's memory. Only the lifecycle manager retains live handles.
+- On division, ownership changes from the mother's slot to the daughter's slot.
+  On death, release both the mother allocation and any gestating daughter allocation.
+
+### Identity, Storage, and Queue Lifetimes
+
+`CreatureId` is a `u16` slot index used by soup ownership and in-memory lookup.
+A separate monotonically increasing `OrganismId: u64` identifies a birth for lineage
+and saved output. Slot reuse must never merge two organisms' histories.
+
+Start with stable creature objects, for example individually allocated creatures indexed
+by a growable table of pointers plus a free-slot list. A growing table may move its pointer
+entries; the creatures themselves must stay at stable addresses while linked.
+
+An `ArrayList(Creature)` that reallocates is incompatible with intrusive queue pointers.
+Do not compact or swap-remove live creatures if their indices identify ownership.
+Bound simultaneous slots by soup capacity and handle slot exhaustion as an explicit
+resource failure.
+
+Each live creature belongs to both queues exactly once, with separate link nodes.
+Remove it from both before destroying its storage or reusing its slot. A cached display
+selection must also validate the organism identity when a slot is reused.
+
+### CPU Outcomes, Flags, and Counters
+
+The execution outcome is a tagged union with one active variant:
+
+| Outcome | Meaning |
+| --- | --- |
+| `none` | CPU-local work finished; no lifecycle request |
+| `mal_request(size)` | Simulation must allocate a daughter block |
+| `divide(allocation)` | Simulation must validate and complete division |
+| `error_condition` | Expected VM fault; record one error |
+| `hard_instruction_success` | Apply the configured reaper reward |
+
+`step` fetches, decodes, dispatches, and increments the creature's executed counter once.
+`execute` owns every instruction-pointer update, including failures and requests.
+`step` must not increment IP again.
+
+The simulation increments the global instruction counter once, then completes any request
+before the next CPU step. Birth/replication events use this updated instruction time;
+inoculation uses time zero. It then performs due mutation/observation work.
+A failed allocation or division uses the same error-accounting path as a CPU fault,
+exactly once.
+
+Clear `fl` at the beginning of each instruction; failures set it to 1. Successful
+lifecycle completion leaves it at 0. Reading genebank/display state must not change it.
+This makes `fl` describe the most recently completed instruction rather than a stale
+earlier fault.
+
+A successful `mov_iab` increments the copy counter once. Failed writes do not count
+as copies. Template operand cells and skipped instructions do not count as executions.
+
+Expected VM faults are outcomes; allocator/I/O failures in host infrastructure use
+Zig error unions and cleanup paths. Do not turn an out-of-memory error from the host
+allocator into an unnoticed Tierran mutation or instruction failure.
+
+### Template Search
+
+Template extraction and complementary search have separate limits and failure meanings.
+
+- The operand begins at the cell after an addressing instruction. It is the consecutive
+  run of `nop_0`/`nop_1` cells there.
+- Extraction traverses at most one soup length. An all-NOP soup must terminate with an
+  invalid-operand outcome, not loop forever. An overlong/invalid operand is distinct
+  from an empty operand.
+- Initially no extra configurable template-length cap is needed. If one is added later,
+  exceeding it must not silently truncate the operand or turn it into an empty template.
+  In particular, `search_limit / 2` is not a template-length definition.
+- Complement swaps `nop_0` with `nop_1` at every position. Candidates are always
+  read in forward order, even when candidate starts are searched backward.
+- With operand start `s` and length `n`, the first forward candidate starts at
+  `s + n`; the first backward candidate starts at `s - n - 1`, modulo soup size.
+  Subsequent candidates move one cell in their respective direction.
+- Exclude any candidate whose cells overlap the addressing instruction or its operand,
+  including after wrapping around. A match elsewhere inside the same creature is legal.
+- `search_limit` bounds candidate rounds per direction; zero means no search.
+  Cap scanning at one soup traversal. Rejected candidates still consume a round.
+- Bidirectional search compares both directions in each round and takes the first
+  match; equal-round ties prefer forward. This is a Zierra convention for a detail
+  the paper's prose leaves unspecified.
+- A successful search returns the address immediately after the matched template.
+  A failed instruction advances past its own full operand, sets `fl`, and reports
+  one execution error.
+- Keep “no operand,” “invalid operand,” and “valid operand with no match” distinguishable
+  in the CPU-facing extraction result. A nullable search result can still mean no match.
+
+### Mutation Units and Reproducibility
+
+Retain the existing configuration names, but define their units before adding RNG calls:
+
+| Field | Meaning |
+| --- | --- |
+| `cosmic_rate` | Mean executed global instructions per cosmic event; 0 disables |
+| `copy_error_rate` | Mean successful instruction copies per copy mutation; 0 disables |
+| `flaw_rate` | Floating-point multiplier of the copy interval; 0 disables flaws |
+
+For Zierra's initial model, each eligible opportunity is an independent trial:
+probability `1 / cosmic_rate` after an executed instruction and
+`1 / copy_error_rate` for a permitted copy. Flaws use an interval of
+`max(1, ceil(copy_error_rate * flaw_rate))` eligible arithmetic executions.
+Disable flaws when either input is zero. A value of 1 means every opportunity.
+Thus `flaw_rate = 1.5` is a multiplier, not a 2/3 probability per instruction.
+
+This independent-trial model avoids fixed periodic events. The paper describes randomized
+intervals and generation-relative rates; these project units are a simplification, not
+an exact reproduction of its experimental parameterization.
+
+Use explicit, separate seeded streams for soup initialization, cosmic mutations, copy
+mutations, and flaws. Specify their seed derivation and call order when implementing
+Phase 4. Rendering, logging, and statistics must not consume simulation randomness.
+
+Keep RNG state at a stable address, and retain all streams' full state for save/load.
+A seed alone cannot resume a run midway through its random sequence.
 
 ---
 
 ## Linear Implementation Plan
 
-Each phase should produce a testable, runnable artifact. Work through the sections in order; everything
-needed for a phase is grouped under that phase header.
+### Phase 1: Compile-Time Shape
 
----
-
-### [x] Phase 1: Compile-Time Shape
-
-Goal: establish the fixed simulation shape, byte-addressed instruction storage, and the basic CPU state.
+Goal: establish configuration, instruction representation, soup storage, and CPU state.
 
 #### Configuration (`src/config.zon`, `src/core/config.zig`)
 
-Configuration is one project-wide object imported from `src/config.zon`. Values that affect type
-layout and values that tune evolutionary behavior are kept together so the simulation has one source of
-truth.
+- [x] A project-wide `src/config.zon` exists.
+- [ ] Add a typed config and compile-time validation.
+- [ ] Make each concrete module receive only the configuration it needs.
+- [ ] Verify importing the config and rebuilding selects the intended concrete types.
 
-**Contents:**
+Current production values, to keep distinct from experimental/test configurations:
 
-- [x] `Config` struct populated from `src/config.zon`:
-  - `soup_size: u16 = 60000`
-  - `stack_depth: u8 = 10`
-  - `search_limit: u16 = 500`
-  - `lineage_enabled: bool = true`
-  - `display_enabled: bool = true`
-  - `reaper_threshold: f32 = 0.8`
-  - `cosmic_rate: u32 = 10000`
-  - `copy_error_rate: u32 = 1000`
-  - `flaw_rate: f32 = 1.5`
-  - `slicer_power: f32 = 1.0`
-  - `snapshot_interval: u64 = 100000`
-  - `output_dir: []const u8 = "output"`
-  - `rng_seed: u64 = 8675309`
+| Field | Type | Value |
+| --- | --- | --- |
+| `soup_size` | `u16` | 60000 |
+| `stack_depth` | `u16` | 10 |
+| `search_limit` | `u16` | 300 |
+| `lineage_enabled` | `bool` | true |
+| `display_enabled` | `bool` | true |
+| `reaper_threshold` | `f32` | 0.8 |
+| `cosmic_rate` | `u32` | 10000 |
+| `copy_error_rate` | `u32` | 1000 |
+| `flaw_rate` | `f32` | 1.5 |
+| `slicer_power` | `f32` | 1.0 |
+| `snapshot_interval` | `u64` | 100000 |
+| `output_dir` | `[]const u8` | "output" |
+| `rng_seed` | `u64` | 8675309 |
 
-**Example `src/config.zon`:**
+Validate positive soup size and stack depth; require finite floats, a reaper threshold
+strictly between 0 and 1, nonnegative flaw multiplier, and nonnegative slicer power.
+Check derived mutation intervals before converting floats to integers. Define zero
+snapshot interval as disabled. Search limit zero is valid and causes searches to fail.
 
-```zon
-.{
-    .soup_size = 60000,
-    .stack_depth = 10,
-    .search_limit = 500,
-    .lineage_enabled = true,
-    .display_enabled = true,
-    .cosmic_rate = 5000,
-    .copy_error_rate = 500,
-    .flaw_rate = 1.5,
-    .slicer_power = 1.0,
-    .snapshot_interval = 50000,
-    .output_dir = "output",
-    .rng_seed = 42,
-}
-```
-
-**Tests:**
-
-- Default config matches original Tierra paper values
-- Config validation rejects invalid soup size, stack depth, and template limit
+These are Zierra defaults. Do not test that every field matches a universal “original
+Tierra default”; several are project choices or values from one experiment.
 
 #### Instruction Set (`src/core/instruction.zig`)
 
-The atomic unit of Tierra. The paper defines 32 instructions, so the logical instruction code is 5
-bits. The soup still stores one instruction per byte, matching the paper's 60,000 byte soup holding
-60,000 Tierran instructions.
-
-**Contents:**
-
-- [x] `Instruction` enum with all 32 instructions
-- [x] `decode(raw: u8) Instruction` — mask/truncate to the low 5 bits
-- [x] `encode(instruction: Instruction) u8` — returns `0x00..0x1f`
-- [x] Use switches or enum iteration where helpful instead of premature metadata tables
-
-**Storage rule from Tierra:**
-
-- Treat each soup cell as one byte of storage, not as a packed 5-bit bitstream.
-- Only the low 5 bits are genetic instruction data.
-- The upper 3 bits are padding and should not participate in decode, mutation, genotype comparison, or
-  copy-error mutation.
-
-**Tests:**
-
-- [x] Sanity checks for decoding and encoding
-- [x] Decode ignores upper 3 storage bits
+- [x] All 32 opcodes are represented by an enum.
+- [x] Encoding/decoding helpers exist and decoding ignores upper storage bits.
+- [ ] Check opcode numbers and register effects against Appendix B.
+- [ ] Verify encode/decode round trips for all 32 instructions.
 
 #### Soup / Memory (`src/core/soup.zig`)
 
-The contiguous memory arena that holds all creature code.
+- [x] Compile-time `Soup(size)`, ownership, allocation, and inoculation foundations exist.
+- [ ] Move from optional instructions to `[size]u8` memory plus
+  `[size]?CreatureId` ownership.
+- [ ] Implement the shared memory and failure contracts, including expected-owner checks.
+- [ ] Accept the documented maximum capacity of 65535; reject zero.
+- [ ] Keep the byte store independent of CPU decoding and queue management.
 
-**Contents:**
-
-- [x] `pub fn Soup(comptime size: u16) type`
-- [x] Specialized `Soup(size)` struct:
-  - `memory: [size]u8`
-  - `owner: [size]?CreatureId`
-- [x] `read(addr: usize) u8`
-- [x] `write(addr: usize, val: u8, writer_id: CreatureId) !void`
-- [x] `allocate(size: usize) ?Allocation`
-- [x] `free(alloc: Allocation)`
-- [x] `count_free_memory() u16`
-- [x] `inoculate(code: []const u8, addr: u16, owner: CreatureId) !Allocation`
-
-**Comptime constraints:**
-
-- [x] `size` must fit in `u16` and default to `60000`.
-- [x] Compile-time assertions reject `size == 0` and values larger than `std.math.maxInt(u16)`.
-- [x]Changing `src/config.zon` and rebuilding specializes a new binary.
-
-**Tests:**
-
-- [x] Allocation/deallocation round-trip
-- [x] Write permission enforcement
-- [x] Free memory accounting
-- [x] Wrap-around reads (not doing a circular soup right now).
-- [x] One-byte-per-instruction behavior
-- [x] Inoculation of ancestor
+Use targeted tests for exact-fit allocation, the last free cell, zero requests, fragmented
+space, range-end overflow, permission failures, and inoculation encountering an occupied
+cell late in its range. Verify failed operations are atomic and freeing preserves code.
+Test wrapping in address helpers rather than requiring low-level reads to wrap.
 
 #### CPU State (`src/core/cpu.zig`)
 
-Each creature has its own CPU context. In this phase, implement CPU shape and stack/register helpers
-without full instruction execution.
+- [x] Registers, a compile-time-sized stack, defaults, and push/pop foundations exist.
+- [x] Stack overflow/underflow and a push/pop round trip have tests.
+- [ ] Confirm failed stack operations preserve stack contents and pointer position.
+- [ ] Keep stack capacity and stack-pointer types consistent.
 
-**Contents:**
+A CPU contains `ax`, `bx`, `cx`, `dx`, `fl`, `sp`, the stack, and `ip`.
+No full executor is needed to complete this checkpoint.
 
-- `pub fn Cpu(comptime opts: Config) type`
-- Specialized `Cpu(opts)` struct:
-  - `ax, bx: u16`
-  - `cx, dx: u16`
-  - `fl: u8`
-  - `sp: u8`
-  - `stack: [opts.stack_depth]u16`
-  - `ip: u16`
-- `init(ip: u16) Cpu`
-- `push(val: u16) !void`
-- `pop() !u16`
+Learning checkpoint: explain why capacity is known at compile time while ownership
+changes at runtime, and why a stack error need not crash the simulation.
 
-This mirrors the original Tierra CPU register struct:
-
-```c
-struct cpu {  /* structure for registers of virtual cpu */
-    int   ax;      /* address register */
-    int   bx;      /* address register */
-    int   cx;      /* numerical register */
-    int   dx;      /* numerical register */
-    char  fl;      /* flag */
-    char  sp;      /* stack pointer */
-    int   st[10];  /* stack */
-    int   ip;      /* instruction pointer */
-};
-```
-
-**Stack behavior pseudo code:**
-
-```text
-push(value):
-    if sp == stack_depth:
-        fl = 1
-        return StackOverflow
-
-    stack[sp] = value
-    sp += 1
-    fl = 0
-
-pop():
-    if sp == 0:
-        fl = 1
-        return StackUnderflow
-
-    sp -= 1
-    fl = 0
-    return stack[sp]
-```
-
-**Tests:**
-
-- [x] Construction and defaults (initializers used, no constructor needed)
-- [x] Stack overflow/underflow
-
-Useful Ziglings: exercises on `enum`, `struct`, `array`, `error_union`, and `comptime`.
-
----
+Useful Ziglings:
+[035_enums](../ziglings/exercises/035_enums.zig),
+[037_structs](../ziglings/exercises/037_structs.zig),
+[045_optionals](../ziglings/exercises/045_optionals.zig),
+[021_errors](../ziglings/exercises/021_errors.zig),
+[066_comptime](../ziglings/exercises/066_comptime.zig), and
+[102_testing](../ziglings/exercises/102_testing.zig).
 
 ### Phase 2: Execution Engine
 
-Goal: make one creature's CPU fetch, decode, execute, and advance through soup memory.
+Goal: run one creature deterministically, without lifecycle creation or mutations.
 
 #### Template Search (`src/core/template.zig`)
 
-**Contents:**
-
-- [x] `searchForward(soup, start, limit) ?u16`
-- [x] `searchBackward(soup, start, limit) ?u16`
-- [x] `searchBidirectional(soup, start, limit) ?u16`
-- [x] Extract the NOP pattern following `start`, then find the complementary pattern
-
-When the limit is fixed at compile time, loops can be bounded with comptime-known constants. Runtime
-limits may still be useful for tests or experiments.
-
-**Tests:**
-
-- [x] Forward, backward, and bidirectional search
-- [x] Not-found behavior
-- [x] Template extraction at wrap-around boundaries
+- [x] Forward, backward, bidirectional search, and address-wrap helpers exist.
+- [x] Existing tests cover basic searches and boundary wrapping.
+- [ ] Separate extraction from searching and align with the shared template contract.
+- [ ] Test equal-distance matches, zero search limit, all-NOP soup, operand overlap after
+  wrapping, and invalid versus empty operands.
+- [ ] Verify skipping a template uses its full length, independently of search distance.
 
 #### CPU Execution (`src/core/cpu.zig`)
 
-**Contents:**
-
-- `execute(cpu: *Cpu, instruction: Instruction, soup: *Soup, creature: *Creature) ExecResult`
-- `step(cpu: *Cpu, soup: *Soup, creature: *Creature) ExecResult`
-- `advance_ip(increment: u16, soup_len: u16)` — overflow-safe `ip` advance, no promotion needed
-- `wrap(address: u16, increment: u16, soup_len: u16) u16` — reusable overflow-safe address advance
-- Implement all 32 instruction handlers, each taking `soup_len: u16` for `ip` updates:
-  - e.g. `nop(cpu: *Cpu, soup_len: u16)`, `or1(cpu: *Cpu, soup_len: u16)`, ...
-  - arithmetic/register ops
-  - stack ops
-  - control flow and template-addressing ops
-  - memory/copy ops
-  - lifecycle signaling ops (`mal`, `divide`)
-- Return `ExecResult` for side effects that belong to the simulation layer:
-  - `none`
-  - `divide`
-  - `mal_request`
-  - `error_condition`
-  - `hard_instruction_success`
-
-**Responsibility split:**
-
-- `step` owns the fetch-decode-dispatch-counter cycle (mirrors the paper's
-  `time_slice`: `fetch` → `decode` → `execute` → `increment_ip`). It never
-  allocates memory, creates creatures, or moves queues.
-- `execute` owns all CPU-local effects: registers, stack, `fl`, soup reads/writes
-  via `soup.read`/`soup.write`, **and every `ip` update**. `step` never advances
-  `ip` itself, which removes the double-advance hazard where a successful jump
-  would be incremented past its target.
-- The simulation owns everything `ExecResult` reports (see Phase 3
-  "`ExecResult` handling"): allocation, division, `creature.errors` counting,
-  and reaper movement. `step`/`execute` only *return* the result; they do not
-  touch queues or the genebank.
-
-**`step` pseudo code:**
+Implement groups in this order: plain arithmetic/register operations, stack operations,
+conditional skips, jumps/calls/returns, addressing, copying, then lifecycle requests.
+Keep mutation hooks disabled until Phase 4.
 
 ```text
-step(cpu, soup, creature):
-    # 1. Fetch. All address arithmetic wraps modulo soup length,
-    #    so the soup behaves as a circular arena.
-    raw = soup.read(wrap(cpu.ip, 0, soup.len))
+step:
+    clear this instruction's error flag
+    fetch a valid soup byte at the normalized instruction pointer
+    decode and execute one instruction
+    increment the creature's executed counter once
+    return its outcome
 
-    # 2. Empty cell. Only reachable if the soup type models
-    #    uninitialized cells as null (the paper's soup is always
-    #    full of random bits, so every fetch decodes to something).
-    if raw is empty:
-        cpu.fl = 1
-        cpu.advance_ip(1, soup.len)   # always advance: never re-execute a fault
-        creature.instructions_executed += 1
-        return error_condition      # simulation counts the error, moves reaper up
-
-    # 3. Decode (masks to the low 5 bits per the storage rule) and dispatch.
-    instruction = decode(raw)
-    result = execute(cpu, instruction, soup, creature)
-
-    # 4. Count the executed instruction. Error counting lives in the
-    #    simulation's error_condition branch, not here.
-    creature.instructions_executed += 1
-    return result
+simulation's later instruction loop:
+    step the current creature
+    increment global executed count once
+    finish any lifecycle request or error accounting
+    apply due mutations
+    finish scheduling/reaping if the slice ended
+    record observations at this completed boundary
 ```
 
-**`execute` dispatch rules (per instruction group):**
+There is no empty-cell fetch in the target byte soup. While the old optional representation
+is being retired, a null fetch can be treated as a VM fault that advances IP once; remove
+that transitional branch and its tests when every cell has a byte.
 
-```text
-execute(cpu, instruction, soup, creature):
-    switch instruction:
-        # Plain ops: nop_0, nop_1, or1, shl, zero, sub_ab, sub_ac,
-        # inc_a, inc_b, dec_c, inc_c, mov_cd, mov_ab.
-        # Each handler takes soup_len and applies register effect
-        # (with flaw hook where configured), then default advance:
-        #     cpu.advance_ip(1, soup.len)
-        #     return none
+| Instruction group | Behavior to establish |
+| --- | --- |
+| Plain arithmetic/register ops | Apply Appendix B's effect using defined 16-bit arithmetic; advance IP once |
+| Stack ops | On failure, preserve the destination/stack state, advance IP, report an error |
+| `if_cz` | If `cx == 0`, next step executes the next instruction; otherwise skip it, including its inline template if present |
+| `jmp` / `jmpb` | Search bidirectionally/backward; land after the complementary template |
+| `call` / `ret` | Push the address after the caller's operand only after a successful search; return to a popped, normalized address |
+| `adr` / `adrb` / `adrf` | Search bidirectionally/backward/forward; store match-end address in `ax` and operand length in `cx`; advance past own operand |
+| `mov_iab` | Copy one instruction from `[bx]` to `[ax]`, enforcing ownership; leave `ax` and `bx` unchanged |
+| `mal` | Advance IP and request allocation of `cx` cells |
+| `divide` | Advance IP and request division, or report an error when no daughter allocation exists |
 
-        # Stack ops: push_ax/bx/cx/dx, pop_ax/bx/cx/dx.
-        # On success: move value, default advance, return none.
-        # On StackOverflow/StackUnderflow (fl is already set by
-        # push/pop itself): still default-advance past the failing
-        # instruction, return error_condition.
+Appendix C's copy loop executes `inc_a` and `inc_b` separately. Incrementing them
+inside `mov_iab` would skip every other instruction and break the ancestor.
+The ancestor also uses the template length in `cx` when calculating its own extent;
+addressing must preserve that interface.
 
-        # if_cz: conditionally execute or skip the next logical instruction.
-        #     if cpu.cx == 0:
-        #         # Do not execute the next instruction inside this handler.
-        #         # Move to it so the next step fetches and executes it normally.
-        #         cpu.advance_ip(1, soup.len)
-        #         return none
-        #
-        #     skipped_addr = wrap(cpu.ip, 1, soup.len)
-        #     skipped_cell = soup.read(skipped_addr)
-        #
-        #     if skipped_cell is empty:
-        #         # The empty cell is skipped rather than fetched, so if_cz does
-        #         # not set fl or return error_condition for that cell.
-        #         cpu.ip = wrap(skipped_addr, 1, soup.len)
-        #         return none
-        #
-        #     skipped_instruction = decode(skipped_cell)
-        #     switch skipped_instruction:
-        #         jmp, jmpb, call, adr, adrb, adrf:
-        #             # These instructions consume the consecutive NOP cells
-        #             # immediately following them as an inline template operand.
-        #             # Reuse template.zig's existing NOP-pattern extraction
-        #             # logic (the logic used by pattern_length_at), but do not
-        #             # call search_forward/search_backward/search_bidirectional:
-        #             # those searches find a complementary target, while if_cz
-        #             # only skips the instruction and its own inline template.
-        #             cpu.ip = skip_template(soup, skipped_addr)
-        #
-        #         else:
-        #             # NOPs and all ordinary instructions occupy one cell when
-        #             # skipped. A NOP run is an operand only when it follows one
-        #             # of the template-using instructions listed above.
-        #             cpu.ip = wrap(skipped_addr, 1, soup.len)
-        #
-        #     # Skipping has no register, stack, soup, or flag side effects from
-        #     # the skipped instruction. In particular, skipped call does not
-        #     # push and skipped adr* does not write ax.
-        #     return none
+A skipped instruction has no effects on registers, flags, stack, counters, or ownership.
+On failed search, leave address-result registers unchanged. On call stack overflow,
+do not jump, and continue after the caller's operand.
 
-        # Jumps: jmp (bidirectional), jmpb (backward), call (bidirectional + push).
-        # Shared mechanics; the variants differ only in search direction and
-        # in whether call pushes a return address.
-        #
-        # 1. Operand: the consecutive NOP run after this instruction is data,
-        #    never fetched and executed.
-        #     pattern_start = wrap(cpu.ip, 1, soup.len)
-        #     pattern_len = NOP run length at pattern_start
-        #
-        # 2. Search for the nearest complementary template within
-        #    config.search_limit, wrapping modulo soup length. The operand
-        #    itself is excluded: the forward scan begins one cell past the
-        #    last operand NOP, the backward scan pattern_len + 1 cells below
-        #    pattern_start (candidates are read in forward order, so a
-        #    backward candidate always ends below the operand). Both scans
-        #    advance one cell per round against one shared step counter; if
-        #    both match in the same round, jmp/call prefer the forward match
-        #    and jmpb the backward match.
-        #     match = jmpb ? template.searchBackward(soup, pattern_start, limit)
-        #                   : template.searchBidirectional(soup, pattern_start, limit)
-        #     # match is the address AFTER the complementary template
-        #
-        # 3. No match: the jump is ignored and
-        #    execution falls through past our own operand
-        #     cpu.fl = 1
-        #     cpu.ip = skip_template(soup, cpu.ip)  # width 1 when no NOPs
-        #     return error_condition
-        #
-        # 4. Empty operand (pattern_len == 0): not an error; the template
-        #    degenerates to register-indirect addressing through bx.
-        #     jmp/jmpb: cpu.ip = wrap(cpu.bx, 0, soup.len); return none
-        #     call: return_addr = wrap(cpu.ip, 1, soup.len)  # next cell is
-        #                # both target and return address: push-only no-op
-        #         push(return_addr)
-        #         on overflow: fl set, default advance, return error_condition
-        #         cpu.ip = return_addr; return none
-        #    (adr with an empty operand is likewise a harmless no-op)
-        #
-        # 5. call with a match: push the return address (first cell past our
-        #    own operand), after the search succeeds -- a failed call pushes
-        #    nothing.
-        #     return_addr = skip_template(soup, cpu.ip)
-        #     push(return_addr)
-        #     on overflow: fl set, ip = skip_template, return error_condition
-        #         # stack full: the call is ignored, no jump happens
-        #
-        # 6. Land: cpu.ip = match; return none. (execute owns ip; step never
-        #    re-increments it, so the next fetch is at the target)
-        #
-        # Notes:
-        # - Success touches only ip (the original also clears fl on every
-        #   successful instruction, jumps included). Jumps are never
-        #   hard_instruction_success.
-        # - Targets may lie inside other creatures' code: read and execute
-        #   privileges are unprotected, only write is.
-        # - Self-complementary operands are legal; a jump may land back
-        #   inside the creature that jumped.
-        # - The original applies the execution-flaw hook to found target
-        #   addresses and pushed return addresses; zierra keeps flaws in
-        #   the arithmetic handlers only (see Phase 4).
+For empty operands, retain these explicit Zierra conventions: `jmp`/`jmpb` jump
+through normalized `bx`; `call` pushes the next address and continues there;
+`adr*` advances once without changing registers. Check the empty case before a
+no-match failure. These details are not established by the paper's abbreviated
+executor; revisit together if a fuller historical specification is adopted.
 
-        # ret:
-        #     on pop success: cpu.ip = wrap(popped_value, 0, soup.len); return none
-        #     on StackUnderflow: fl set, default advance, return error_condition
-
-        # Address-to-register: adr (bidirectional), adrb (backward), adrf (forward).
-        # Same search as jumps, but writes the result instead of jumping:
-        #     if match is null: fl = 1, ip = skip_template, return error_condition
-        #     else: cpu.ax = match, ip = skip_template, return hard_instruction_success
-        # (hard_instruction_success lets the simulation move the creature
-        # down the reaper queue; see Phase 3.)
-
-        # mov_iab (copy with ownership check):
-        #     data = soup.read(wrap(cpu.bx, 0, soup.len))       # read is always allowed
-        #     if data is empty: fl = 1, default advance, return error_condition
-        #     try soup.write(wrap(cpu.ax, 0, soup.len), maybeCopyError(data), creature.id)
-        #     on WriteProtected: fl = 1, default advance, return error_condition
-        #     on success: cpu.ax = wrap(cpu.ax, 1, soup.len); cpu.bx = wrap(cpu.bx, 1, soup.len)
-        #         creature.instructions_copied += 1
-        #         cpu.advance_ip(1, soup.len)   # old_ip = ip on entry to mov_iab
-        #         return none
-        # Note: ax/bx wrap independently of ip; all three use modulo soup length.
-
-        # mal: do NOT allocate here; the simulation owns the soup free list.
-        #     cpu.advance_ip(1, soup.len)   # advance BEFORE returning,
-        #                                   # or the same mal re-executes forever
-        #     return mal_request(cpu.cx)
-
-        # divide: do NOT create the creature here.
-        #     if creature.daughter_alloc is null:
-        #         cpu.fl = 1; cpu.advance_ip(1, soup.len); return error_condition
-        #     cpu.advance_ip(1, soup.len)   # same advance-first rule as mal
-        #     return divide(creature.daughter_alloc)
-```
-
-**IP helpers used above:**
-
-```text
-advance_ip(increment, soup_len):
-    # Overflow-safe ip update without promoting to a wider int.
-    # Assumes ip < soup_len and soup_len > 0.
-    step = increment mod soup_len
-    threshold = soup_len - step
-    if ip < threshold: ip += step
-    else: ip -= threshold
-
-wrap(address, increment, soup_len):
-    # Overflow-safe address advance reusable for bx/ax/pattern_start.
-    # Assumes soup_len > 0; address may be outside the soup range.
-    normalized_address = address mod soup_len
-    step = increment mod soup_len
-    threshold = soup_len - step
-    if normalized_address < threshold: return normalized_address + step
-    else: return normalized_address - threshold
-    # ip itself always moves via advance_ip
-
-skip_template(soup, instr_addr):
-    # Width of "this instruction plus its trailing NOP template", or 1
-    # when the next cell is not a NOP. Used both for landing past our own
-    # template after a failed search and for if_cz skipping over a
-    # template-user plus its NOPs.
-    template_start = wrap(instr_addr, 1, soup.len)
-    # Reuse the same wrapped consecutive-NOP extraction used by
-    # template.zig's pattern_length_at. Do not perform a complementary search.
-    length = template pattern length at template_start, or 0 when it is not a NOP
-    return wrap(template_start, length, soup.len)
-```
-
-**Flag and counter ownership (who writes what):**
-
-- `cpu.fl`: set to `1` by `push`/`pop` failures, failed template searches,
-  failed ownership checks, empty-cell fetch, and `divide` with no daughter;
-  cleared to `0` by successful `push`/`pop`. Successful `adr*` reports via
-  `hard_instruction_success` rather than touching `fl` directly.
-- `creature.instructions_executed`: incremented once per `step`, on every path
-  including faults.
-- `creature.instructions_copied`: incremented only by successful `mov_iab`
-  inside `execute`.
-- `creature.errors`: incremented only by the simulation's `error_condition`
-  branch, never by `step`/`execute` (keeps reaper policy in one place).
-
-**Tests:**
-
-- Each instruction in isolation
-- Full step cycle: fetch, decode, execute, advance IP
-- `step` on an empty cell returns `error_condition` and advances `ip`
-- Jump/call land on the address *after* the complementary template; failed
-  search sets `fl`, lands past the instruction's own NOPs, returns
-  `error_condition`
-- `jmp` with an empty operand (next cell is not a NOP) jumps to `bx` without
-  setting `fl`; an empty `call` pushes the next address and continues there
-- Failed `call` (no match or stack overflow) pushes nothing and does not jump
-- `jmpb` finds a match located below the jump but never scans forward past
-  its own operand template
-- `if_cz` with `cx != 0` skips a plain instruction (width 1) and skips a
-  template-user plus its NOPs (width 1 + template length)
-- `call` pushes the return address past its own template; `ret` pops it back
-- `mov_iab` advances `ax`/`bx`, counts the copy, and returns `error_condition`
-  on write-protection instead of propagating the soup error
-- `mal`/`divide` advance `ip` before returning their `ExecResult`, and
-  `divide` without a daughter allocation returns `error_condition`
-- Error flag behavior
-- `ExecResult` behavior for `mal` and `divide`
-- Wrap-around: `ip`, `ax`, `bx` arithmetic modulo soup length
+Use successful `adr*` and completed `mal` as the initial “hard instruction” reward
+policy. The paper describes two difficult instructions without naming them in its prose;
+this opcode choice is a Zierra policy pending a fuller specification. A `mal_request`
+needs no second simultaneous union variant: the simulation applies its reward after
+allocation succeeds.
 
 #### Creature (`src/core/creature.zig`)
 
-Represents a living organism in the soup.
+- Embed the specialized CPU directly.
+- Store slot ID, organism identity, mother allocation, optional daughter allocation,
+  birth time, and the counters described in the shared contracts.
+- Keep current genotype identity separate from the parent's genotype identity when
+  the genebank is introduced.
+- Avoid an import cycle between CPU and creature. Pass a narrow execution context or
+  use generic parameters where appropriate; do not duplicate mutable CPU state.
 
-**Contents:**
+Tests should cover overflow/underflow in registers, IP movement for every instruction
+group, successful/failing copy permissions, unchanged copy address registers, flags,
+template skips, `adr*` updating `cx`, call failure atomicity, and single counting
+on fault paths.
 
-- `CreatureId`
-- `Creature` struct:
-  - `id: CreatureId`
-  - `cpu: Cpu`
-  - `mother_alloc: Allocation`
-  - `daughter_alloc: ?Allocation`
-  - `errors: u32`
-  - `instructions_executed: u64`
-  - `instructions_copied: u64`
-  - `parent_genotype: ?GenotypeId`
-  - `origin_time: u64`
-- `init(id, alloc, ip, parent) Creature`
+Learning checkpoint: trace a small copy loop by hand, including every IP change.
+Explain which effects belong to CPU execution and which must await the simulation.
 
-**Tests:**
-
-- Construction and field defaults
-- Error accumulation
-
-Useful Ziglings: 030_switch / 108_labeled_switch (dispatch in `execute`), 035_enums
-(switching over `Instruction`), 045_optionals (empty-cell fetch, nullable search
-results), 039_pointers (`*Cpu`/`*Soup`/`*Creature` mutation in `step`), 021_errors
-through 024_errors4 plus 033_iferror (`StackError`, `WriteProtected` mapped to
-`error_condition`), and 055_unions (the `ExecResult` tagged union).
-
----
+Useful Ziglings:
+[030_switch](../ziglings/exercises/030_switch.zig),
+[039_pointers](../ziglings/exercises/039_pointers.zig),
+[033_iferror](../ziglings/exercises/033_iferror.zig),
+[055_unions](../ziglings/exercises/055_unions.zig),
+[059_integers](../ziglings/exercises/059_integers.zig),
+[097_bit_manipulation](../ziglings/exercises/097_bit_manipulation.zig), and
+[108_labeled_switch](../ziglings/exercises/108_labeled_switch.zig).
 
 ### Phase 3: Lifecycle Management
 
-Goal: run a minimal Tierra loop with creatures, queues, allocation, division, and reaping.
+Goal: make the ancestor reproduce in a mutation-free, headless simulation.
 
 #### Scheduler (`src/sim/scheduler.zig`)
 
-Manages the slicer queue, reaper queue, and the main simulation loop's creature ordering.
+Start with a small queue exercise before adding both queues to the simulation.
+Intrusive doubly linked queues use the stable-storage contract above.
 
-**Slicer contents:**
+- Slicer: circular round-robin queue, separate current cursor, insert/remove operations.
+- Insert a newborn immediately before its mother in traversal order. For
+  `mother -> A -> B -> mother`, birth produces
+  `mother -> A -> B -> daughter -> mother`. The daughter does not immediately
+  receive the remainder of the mother's slice.
+- Slice size is `floor(genome_size ^ slicer_power)`, clamped to at least 1.
+  Validate/clamp before narrowing to the chosen budget type; large powers must not
+  overflow a `u16` conversion. A `u64` budget is suitable for long slices.
+- Reaper: linear queue; newborns enter at the bottom and victims come from the top.
+- On error, move up one position only if the neighbor above has no more errors.
+  On a hard-instruction success, move down one position only if the neighbor below
+  has at least as many errors. This is a local movement rule, not a globally sorted list.
+- Define empty and singleton behavior. Queue access must be optional when empty.
+  Removing a cursor target must leave a valid successor or an empty queue.
 
-- `SlicerQueue` — doubly-linked circular list of creatures
-- `insert(creature, after)`
-- `next() *Creature`
-- `remove(creature)`
-- `sliceSize(genome_size, slicer_power) u16`
+Test round-robin order, the explicit birth example, singleton removal, current-cursor
+removal, movements blocked by neighbor error counts, and simultaneous membership
+in both queues.
 
-**Reaper contents:**
+#### Ancestor (`src/sim/ancestor.zig`)
 
-- `ReaperQueue` — doubly-linked list
-- `addToBottom(creature)`
-- `killTop() CreatureId`
-- `moveUp(creature)`
-- `moveDown(creature)`
+Transcribe the 80-instruction `0080aaa` genome from Appendix C as constant bytes.
+Validate exact length, canonical opcode values, and fit in the selected soup.
+“Every byte decodes” alone is insufficient validation because decoding masks every
+possible byte into some instruction.
 
-**Tests:**
+First trace its self-examination: at base 0, `adrb` finds match-end 4,
+`sub_ac` obtains base 0, `adrf` finds match-end 79, and `inc_a`/`sub_ab`
+calculate size 80. Then trace allocation, copying, and division.
 
-- Slicer round-robin ordering
-- Daughter-before-mother insertion order
-- Slice size calculation with different powers
-- Reaper kill order
-- Reaper movement constraints
-- Creatures added/removed from both queues simultaneously
+#### Simulation (`src/sim/simulation.zig`)
 
-#### Ancestor Genome (`src/sim/ancestor.zig`)
+Create a small `Simulation(config)` with soup, creature storage, queues, and basic
+statistics. Introduce `init`/`deinit` with allocator ownership as needed. Keep
+genebank, persistence, and display dependencies out until their phases.
 
-**Contents:**
+- Inoculation prepares a creature/slot, claims the complete seed range, initializes
+  CPU IP to its start, and links it into both queues. Failure cleans up preparation.
+- Complete each CPU outcome before executing the next instruction.
+- `mal`: reject an existing daughter or invalid size; claim a contiguous range for
+  the mother, store the daughter handle, and set `ax` to its start.
+  On allocation failure, preserve existing state and record one VM error.
+- `divide`: validate ownership, prepare the daughter object/slot, then transfer
+  ownership and publish the new creature to both queues. Clear the mother's daughter
+  handle only when the operation commits. On preparation failure, the mother keeps it.
+- Initialize the daughter's CPU with zeroed registers/flags, an empty stack, and IP at
+  its mother-allocation start. The daughter starts with no daughter allocation.
+- Do not require the copied counter to equal the allocation length before division;
+  old code in newly allocated cells is meaningful, and later organisms may copy
+  partially or use other creatures' code.
+- Death unlinks both nodes, frees both owned blocks, updates population, and releases
+  the slot/object. The instruction bytes remain in soup.
 
-- The 80-instruction self-replicating program (`0080aaa`) encoded as `[80]u8`
-- Compile-time validation that every byte decodes to a known instruction
-- Compile-time validation that the genome fits in `config.soup_size`
+`tick` executes one slice, handling results after each instruction. After its last
+instruction's mutation work, advance the slicer and reap while occupied memory exceeds
+the configured threshold, before recording that boundary's observations.
+`reaper_threshold = 0.8` means 80% occupied, hence 20% free; it is not a minimum
+free fraction of 80%. Derive a single integer occupied-cell threshold at startup
+using documented rounding, initially `floor(threshold * soup_size)`.
+Count gestating daughter allocations as occupied memory.
 
-**Tests:**
+Initially a fragmented/no-space `mal` fails; reaping occurs at slice boundaries.
+Do not introduce hidden allocation retries or kill the executing mother inside
+allocation handling without revisiting this scheduling policy.
 
-- Ancestor bytes decode successfully
-- Ancestor length matches expected genome size
+Stop cleanly when no creatures remain. Define `run(max_instructions)` as executing
+at most that many additional instructions, including a partial final slice.
+Preserve the current creature and its remaining slice budget if a run is paused
+mid-slice. Complete end-of-slice scheduling/reaping even when the final allowed
+instruction exhausts a slice, so splitting a run does not change its scheduling. A zero budget executes nothing. Prevent huge slices from delaying
+pause/quit handling indefinitely by polling at bounded instruction intervals.
 
-#### Simulation Engine (`src/sim/simulation.zig`)
+Tests and exit criteria:
 
-Ties together soup, CPU, creatures, scheduler queues, and the main loop.
+- [ ] Inoculation creates one correctly owned, scheduled creature.
+- [ ] With all mutation rates disabled, the ancestor produces an identical 80-byte daughter.
+- [ ] The daughter can reproduce too; population growth is not only a one-birth artifact.
+- [ ] Allocation/division failures preserve ownership and queue invariants.
+- [ ] Reaping frees gestating daughter memory and handles extinction.
+- [ ] Threshold checks, exact run budgets, and empty queues behave as specified.
 
-**Contents:**
+Learning checkpoint: explain the difference between soup allocation and host allocation,
+and demonstrate why live queue pointers require stable creature addresses.
 
-- `pub fn Simulation(comptime config: Config) type`
-- Specialized `Simulation(config)` struct:
-  - `soup: Soup(config.soup_size)`
-  - `slicer: SlicerQueue`
-  - `reaper: ReaperQueue`
-  - `stats: Stats`
-- `config: Config`
-- `init() Simulation(config)`
-- `inoculate(ancestor_code: []const u8) !CreatureId`
-- `tick()`:
-  1. Execute the current creature's time slice
-  2. Handle `ExecResult` values from CPU steps
-  3. Advance slicer
-  4. Reap while free memory is below threshold
-  5. Update stats
-- `run(max_instructions: u64)`
-
-**`ExecResult` handling:**
-
-`ExecResult` reports only work that crosses the CPU/soup boundary and must be completed by the
-simulation. CPU-local effects such as changing registers, the stack, flags, or the instruction pointer
-are applied by `execute` itself.
-
-`ExecResult` is a tagged union, not a struct containing independent boolean flags. Each call returns
-exactly one active result. Variants carry a payload only when the simulation needs data: `mal_request`
-carries the requested size and `divide` carries the daughter allocation. `none`, `error_condition`,
-and `hard_instruction_success` are payload-free tags; giving them boolean payloads would permit
-meaningless states such as `.none = false`.
-
-Expected Tierran execution failures are values, not Zig errors. Stack overflow or underflow, failed
-template searches, write protection, and invalid lifecycle operations are converted to
-`error_condition` inside `execute`. Zig error unions remain reserved for unexpected infrastructure or
-programming failures that cannot be represented as an execution outcome.
-
-- `none`:
-  - No additional simulation work is required after CPU execution.
-  - The instruction may still have changed CPU registers, stack state, flags, the instruction pointer,
-    or soup memory.
-- `mal_request: size`:
-  - Request a daughter-cell allocation of `size` instructions, normally taken from `cpu.cx`.
-  - Reject the request if the creature already owns a daughter allocation.
-  - On success, assign ownership of the allocation to the requesting creature, store it in
-    `creature.daughter_alloc`, and place its starting address in `cpu.ax`.
-  - On failure, set the CPU error flag and process the outcome as an `error_condition`.
-- `divide: daughter_alloc`:
-  - Reject division when the creature has no valid daughter allocation.
-  - Remove the mother's write privileges over the daughter allocation and clear
-    `mother.daughter_alloc`, allowing the mother to request another daughter cell later.
-  - Create a new creature and CPU whose mother allocation is the former daughter allocation, and set
-    the daughter's initial instruction pointer.
-  - Insert the daughter into the slicer queue immediately ahead of its mother and at the bottom of the
-    reaper queue.
-  - Update population, genotype, lineage, and replication statistics.
-- `error_condition`:
-  - The CPU sets `fl = 1` when it detects the failed instruction.
-  - Increment `creature.errors` and attempt to move the creature one position toward the top of the
-    reaper queue, subject to the queue's error-count ordering constraint.
-- `hard_instruction_success`:
-  - Clear the CPU error flag as appropriate for the successful instruction.
-  - Attempt to move the creature one position toward the bottom of the reaper queue, subject to the
-    queue's error-count ordering constraint.
-  - The original paper says that two difficult instructions receive this treatment but does not name
-    them in its prose; verify their identities against the original simulator before fixing this result
-    to particular opcodes.
-
-**Tests:**
-
-- Inoculation creates one creature with correct genome
-- Ancestor self-replicates far enough to create a second creature
-- Reaper triggers when memory fills
-- Integration test: run for N instructions and verify population changes
-
-Useful Ziglings: exercises on linked lists or pointer-like data structures, allocator-backed containers,
-and testing.
-
----
+Useful Ziglings:
+[043_pointers5](../ziglings/exercises/043_pointers5.zig),
+[047_methods](../ziglings/exercises/047_methods.zig),
+[029_errdefer](../ziglings/exercises/029_errdefer.zig),
+[096_memory_allocation](../ziglings/exercises/096_memory_allocation.zig), and
+[102_testing](../ziglings/exercises/102_testing.zig).
+There is no dedicated linked-list exercise in this checkout; use a small local queue test.
 
 ### Phase 4: Evolution & Lineage
 
-Goal: add mutation, genotype tracking, statistics, and birth/death/replication event recording.
+Goal: introduce mutation, genotype tracking, statistics, and ordered organism events.
 
-#### Mutation Engine (`src/sim/mutation.zig`)
+#### Mutation (`src/sim/mutation.zig`)
 
-**Contents:**
+Add one mutation class at a time, retaining a fully disabled configuration.
 
-- `MutationConfig`:
-  - `cosmic_rate: u32`
-  - `copy_error_rate: u32`
-  - `flaw_rate: u32`
-  - RNG state
-- `cosmicRay(soup: *Soup)`
-- `maybeCopyError(instruction: u8) u8`
-- `maybeFlawResult(value: u16) u16`
-- Use Zig's `std.Random` with deterministic startup seed
+- Cosmic events flip one random bit in positions `0..4` at a random soup address,
+  regardless of ownership, after instruction completion.
+- Copy mutation applies only after destination permission is known to succeed and
+  before storing the copied byte. The source byte stays unchanged unless source
+  and destination are the same address.
+- Initially apply execution flaws only to arithmetic/bit operations. For arithmetic,
+  perturb the result by ±1 with defined 16-bit wrapping. For `or1`, perturb the
+  chosen bit (no flip or bit 1 instead of bit 0); for `shl`, use shift 0 or 2
+  instead of 1. Keep moves, stack, jumps, and lifecycle deterministic initially.
+  This restricted scope is a documented simplification of the paper.
+- Pass a mutation context through a narrow CPU interface; do not make CPU execution
+  import or call the simulation.
+- Use `std.Random.Xoshiro256` or another explicitly recorded seedable generator,
+  with the separate stream/lifetime contract above.
 
-**Integration points:**
-
-- Background mutation from the main loop every `cosmic_rate` instructions
-- Copy error in the `mov_iab` execution path
-- Execution flaw in arithmetic/bit-flip instruction handlers
-
-**Tests:**
-
-- Cosmic ray modifies exactly one low-5-bit position
-- Copy errors only flip bit positions `0..4`
-- Copy errors return canonical `0x00..0x1f` instruction bytes
-- Flaw magnitude is only +/- 1
-- Deterministic tests with fixed seed
+Verify disabled rates, certain events at interval 1, single-bit mutation, canonical
+bytes, denied-copy behavior, and deterministic replay. Use injected random decisions
+to force edge cases. Do not write probabilistic tests that sometimes fail because no
+mutation happened.
 
 #### Genebank & Statistics (`src/sim/genebank.zig`)
 
-**Contents:**
+A creature records its birth genotype. Cosmic mutation may change its living bytes
+without changing that historical identity; census counts are initially by birth
+genotype. Label live-byte inspection separately.
 
-- `GenotypeId` — size + 3-letter code, e.g. `0080aaa`
-- `GenotypeRecord`:
-  - name and parent name
-  - origin time
-  - metabolic data
-  - environmental params at origin
-  - `breeds_true: bool`
-  - `max_prop_pop, max_prop_inst: f32`
-- `Genebank`:
-  - genotype hash map
-  - `register(genome: []const u8, parent: ?GenotypeId, metadata) GenotypeId`
-  - `lookup(id: GenotypeId) ?GenotypeRecord`
-  - `nameForSize(size: usize) GenotypeName`
-- `Stats`:
-  - `inst_exec_c: u64`
-  - `population: u32`
-  - `free_memory: u16`
-  - size-class histogram
+- Register canonical genomes at birth. Own a copy of the genome: a slice into soup
+  will change, and a hash alone can collide. Compare bytes after a hash match.
+- Maintain a current genotype ID as well as optional parent genotype ID.
+  Derive parentage from the parent's birth genotype under this initial policy.
+- Start with size + three-letter base-26 labels (`0080aaa`, `0080aab`, ...).
+  Define exhaustion after `zzz`: return an explicit naming error, never silently wrap.
+- A known genotype can arise from multiple parent genotypes. Keep a first-discovery
+  parent on the record if useful; lineage events retain the actual organism parent.
+- Record origin time, live population, replication counts, and instruction/error/copy
+  totals or interval deltas as the corresponding measurements become available.
+- At birth, first-replication metrics are unknown and must be optional. Populate them
+  on actual replication, not with fabricated zeros during registration.
+- Mark `breeds_true` when a completed replication produces bytes equal to the parent's
+  stored birth genome. Track replication count separately. Naming every birth
+  genotype immediately is a Zierra simplification: the paper describes one genebank
+  implementation that waits for two replications and an identical offspring.
+- Keep error counters, total population, and genotype census consistent on birth/death.
+  Define deterministic census tie-breaking, for example by genotype label.
 
-**Tests:**
+Test registration, high-bit canonicalization, distinct genomes of equal size, known
+genomes with different parents, label exhaustion, breeds-true detection, and counters.
 
-- Genotype naming convention
-- Registration and lookup
-- Stats accumulation
+#### Lineage (`src/persistence/lineage.zig`)
 
-#### Lineage Tracking (`src/persistence/lineage.zig`)
+Start with synchronous buffered JSONL, not a lock-free queue.
 
-Records every organism birth, death, and first replication as an append-only JSONL event log.
+- Output one ordered event per line in `output/<run_id>/lineage.jsonl`.
+- Record ancestor birth with no parent, later births with parent and child
+  `OrganismId`, deaths, and the parent's first successful replication.
+- Include genotype IDs, global instruction time, and an event sequence number so
+  multiple events at the same instruction retain a defined order.
+- Start with death cause `reaped`. An `error_limit` death policy requires an
+  explicit future configuration/behavior decision and is not implied by VM faults.
+- Use error-returning `record` and `flush`; surface I/O failures. Flush buffered output
+  on successful shutdown, and ensure cleanup happens on error.
+- Record the active config, RNG algorithm/seed scheme, Zig version, and simulation
+  format/version in run metadata so an experiment can be interpreted later.
+- A disabled lineage feature should not open its files or affect simulation randomness.
 
-**Contents:**
+If profiling later justifies a writer thread, send owned immutable events through a
+bounded queue. Define blocking/backpressure, writer-failure propagation, buffer ownership,
+and shutdown/drain/join before adding it. “Non-blocking” cannot also promise to block
+when full. Lock-free algorithms are an optional advanced exercise.
 
-- `LineageEvent` tagged union:
-  - `.birth { parent_id: ?CreatureId, child_id: CreatureId, genotype_id: GenotypeId, time: u64 }`
-  - `.death { creature_id: CreatureId, time: u64, cause: DeathCause }`
-  - `.first_replication { creature_id: CreatureId, genotype_id: GenotypeId, time: u64 }`
-- `DeathCause` enum: `reaped`, `error_limit`
-- `LineageWriter`:
-  - ring buffer of events
-  - background thread flushing to `output/<run_id>/lineage.jsonl`
-  - `record(event: LineageEvent)`
-  - `flush()` / `deinit()`
+Learning checkpoint: distinguish organism identity from reusable storage slots and
+explain why a genebank must own bytes instead of borrowing mutable soup memory.
 
-**Integration points:**
-
-- Creature birth from `divide`
-- Creature death from reaper/error paths
-- First replication and breeds-true updates
-
-**Tests:**
-
-- Event serialization round-trip
-- JSONL formatting correctness
-- Simulation run writes birth/death events with correct parent-child relationships
-
-Useful Ziglings: exercises on random numbers, tagged unions, JSON/string formatting, and allocators.
-
----
+Useful Ziglings:
+[055_unions](../ziglings/exercises/055_unions.zig),
+[096_memory_allocation](../ziglings/exercises/096_memory_allocation.zig),
+[099_formatting](../ziglings/exercises/099_formatting.zig), and
+[106_files](../ziglings/exercises/106_files.zig).
+For optional later threading:
+[104_threading](../ziglings/exercises/104_threading.zig) and
+[105_threading2](../ziglings/exercises/105_threading2.zig).
 
 ### Phase 5: Snapshots & Persistence
 
-Goal: make simulation state observable over time and resumable.
+Goal: observe a run and resume it deterministically. Summary snapshots and resumable
+checkpoints are different artifacts with different data requirements.
 
-#### Periodic Snapshots (`src/persistence/snapshot.zig`)
+#### Periodic Summaries (`src/persistence/snapshot.zig`)
 
-**Contents:**
+- At completed instruction boundaries, capture summaries every
+  `config.snapshot_interval` global instructions; zero disables.
+- Record population, occupied/free memory, genotype census, size histogram, and time.
+  Define ordering so identical simulation states produce identical summary content.
+- The initial writer is synchronous and buffered. Snapshot construction owns its
+  variable-length data and can fail allocation; expose allocator and cleanup lifetimes.
+- If later sending summaries to a writer thread, deep-copy slices. A `*const Simulation`
+  does not prevent another thread from mutating the same underlying memory.
+- Write metadata separately so summaries can refer to the run/config version.
 
-- `SnapshotWriter`
-  - interval from `config.snapshot_interval`
-  - writes to `output/<run_id>/snapshots/<inst_count>.json`
-  - captures population, genotype census, top genotypes, free memory, and instruction counter
-  - background writer thread
-- `takeSnapshot(sim: *const Simulation) SnapshotData`
+Test exact snapshot boundaries, disabled output, census agreement, and error cleanup.
 
-**Tests:**
+#### Save/Load (`src/persistence/state.zig`)
 
-- Run for N instructions and verify files are written at expected intervals
-- Snapshot data matches simulation state
+Design a versioned data-only checkpoint schema before implementing serialization.
+Do not serialize raw pointers, intrusive nodes, allocator internals, file handles, or
+the entire in-memory simulation struct.
 
-#### Save/Load State (`src/persistence/state.zig`)
+Capture at least:
 
-**Contents:**
+- Config compatibility information, schema version, and instruction boundary/order.
+- All soup bytes, including unowned code, plus ownership/allocation state.
+- Creature slots, organism IDs, CPU registers, initialized stack portion, allocations,
+  birth genotype, counters, and timestamps.
+- Slicer order/cursor and remaining current-slice budget; reaper order.
+- Full RNG stream states and any pending mutation schedule state.
+- Genebank-owned genomes, labels/naming counters, census, replication metadata, and stats.
+- Next organism ID, reusable slots, event sequence, and next observation boundaries.
 
-- `save(sim: *const Simulation, path: []const u8) !void`
-- `load(allocator: Allocator, path: []const u8) !Simulation`
-- Use `std.json.stringify` for output and `std.json.parseFromSlice` for loading
+Rebuild queue links and lookup structures when loading into final storage. Validate
+ranges, unique identities, owners, queue membership, stack pointers, and config
+compatibility before exposing the loaded instance. Free partially constructed state
+on any parse/allocation/validation failure.
 
-**Tests:**
+Use Zig 0.16.0's `std.json.Stringify` and `std.json.parseFromSlice`, checking actual
+signatures in the installed library. Own or copy parsed data before releasing its
+parse arena. Serialize only initialized stack entries; `undefined` storage is not
+checkpoint data.
 
-- Save simulation, load into a new instance, verify state matches
-- Continue running after load
+Write to a temporary file and replace the checkpoint only after a successful write/flush.
+Initially resume into a new output run with metadata pointing to its parent checkpoint,
+rather than appending potentially duplicated events to an old lineage file.
 
-Useful Ziglings: exercises on file I/O, JSON, allocators, and error cleanup.
+Exit criterion: run A+B uninterrupted and compare it with run A, save/load, then B.
+Compare soup, ownership, CPU/queue state, genotypes, counters, and RNG state; matching
+population alone is insufficient. Also reject truncated files, unsupported versions,
+and incompatible fixed storage shapes.
 
----
+Useful Ziglings:
+[029_errdefer](../ziglings/exercises/029_errdefer.zig),
+[096_memory_allocation](../ziglings/exercises/096_memory_allocation.zig),
+[106_files](../ziglings/exercises/106_files.zig), and
+[107_files2](../ziglings/exercises/107_files2.zig).
 
 ### Phase 6: Visualization
 
-Goal: add an optional notcurses display without changing the simulation core.
+Goal: add optional notcurses views while preserving headless simulation behavior.
 
-#### Build Configuration (`build.zig`)
+#### Build and C Wrapper (`build.zig`, `src/display/notcurses.zig`)
 
-The basic build/test/run wiring can stay minimal until the display layer needs C interop.
+- Read `display_enabled` at build time. Only enabled artifacts import the C wrapper
+  and link notcurses/libc. A headless build and normal core tests must work without
+  the notcurses development package.
+- With Zig 0.16.0, configure system-library linking on the relevant
+  `std.Build.Module` and its `link_libc` setting; check its current signatures.
+- Use `@cImport` and a namespaced `pub const c` or explicit public aliases.
+  `pub usingnamespace` is unavailable in Zig 0.16.0.
+- Add thin C error/default wrappers only as actual call sites require them.
+- Add `zig build test-display` for display-specific checks when this phase begins.
+  This command does not exist yet.
+- Document the system's notcurses development package and header/library discovery.
 
-**Contents:**
+#### Display and Views (`src/display/`)
 
-- Link notcurses-core as a system library and link libc:
-  ```zig
-  exe.linkSystemLibrary("notcurses-core");
-  exe.linkLibC();
-  ```
-- Add a display integration test step:
-  - `zig build test-integration` — run tests that require notcurses installed
-- Keep normal commands available:
-  - `zig build`
-  - `zig build run`
-  - `zig build test`
+- Initialize/tear down notcurses with cleanup on partially successful initialization.
+- Start with a soup map and basic statistics; then add creature inspection and a
+  size histogram.
+- Render read-only state at a throttled rate on the simulation thread between completed
+  instructions/batches. No cross-thread shared-state design is needed initially.
+- Map input to quit, pause/resume, selection, and later single-step commands.
+  Define single-step as one completed instruction, not a whole slice.
+- While paused, keep polling input and rendering without advancing counters or RNG.
+- Handle terminal resizing and empty/extinct populations.
+- Validate a selection's organism identity when slots are recycled.
 
-#### Notcurses Wrapper (`src/display/notcurses.zig`)
+Compile/link checks can run without an interactive terminal. Actual notcurses
+initialization/rendering tests require a suitable terminal or PTY; do not assume a
+headless mode exists. Keep most view-mapping tests independent of terminal setup.
+Verify display enabled/disabled produces the same simulation state for a fixed run.
 
-**Contents:**
-
-- `@cImport` + `pub usingnamespace` re-export:
-  ```zig
-  const c = @cImport({
-      @cDefine("_XOPEN_SOURCE", "700");
-      @cInclude("notcurses/notcurses.h");
-  });
-  pub usingnamespace c;
-  ```
-- Default C struct initializer helpers
-- `err(code: c_int) !void` for negative C return codes
-
-#### Display Orchestration (`src/display/display.zig`)
-
-**Contents:**
-
-- `Display` struct:
-  - `ctx: *nc.notcurses`
-  - `stdplane: *nc.ncplane`
-  - dedicated planes for each view
-- `init() !Display`
-- `deinit()`
-- `render(sim: *const Simulation)`
-- `pollInput() ?InputEvent`
-
-#### Views (`src/display/`)
-
-**Contents:**
-
-- `soup_view.zig` — color-coded soup map
-- `stats_view.zig` — population, diversity, instruction count, free memory
-- `creature_view.zig` — selected creature registers and genome
-- `size_histogram.zig` — size-class distribution bar chart
-
-**Tests:**
-
-- Display module compiles and links against notcurses
-- Init/deinit without crash
-- View rendering functions produce expected plane contents, preferably against a mock plane
-
-**Prerequisite:** the `notcurses-core` package must be installed on the system, for example
-`apt install libnotcurses-dev` or equivalent.
-
-Useful Ziglings: exercises on C interop, optionals, and error handling.
-
----
+Useful Ziglings:
+[093_hello_c](../ziglings/exercises/093_hello_c.zig),
+[094_c_math](../ziglings/exercises/094_c_math.zig),
+[045_optionals](../ziglings/exercises/045_optionals.zig), and
+[027_defer](../ziglings/exercises/027_defer.zig).
 
 ### Phase 7: Polish
 
-Goal: make the simulation convenient to run and tune.
+Goal: make experiments convenient and optimize only measured bottlenecks.
 
 #### CLI (`src/main.zig`)
 
-**Contents:**
-
-- Show the active config at startup
-- Headless/display selection based on `config.display_enabled`
-- Run length / max instruction argument
-- Output directory/run ID handling
+- Show active configuration and run metadata.
+- Parse bounded run length, output location/run ID, and supported pause/resume options.
+- Keep shape/feature changes in `src/config.zon`. A binary compiled without display
+  cannot enable it at runtime; a display-enabled binary may offer headless execution.
+- Reject invalid arguments and avoid accidental overwriting of prior run output.
+- Report extinction, completed budgets, and persistence failures clearly.
+- Keep shutdown flushing and terminal cleanup reliable.
 
 #### Performance
 
-**Contents:**
+Profile instruction dispatch, allocation scans, queue operations, and rendering only
+after deterministic replication and replay tests pass. Benchmark headless runs with
+output disabled to separate simulation cost from I/O cost.
 
-- Profile the hot loop after correctness tests pass
-- Optimize soup allocation scans, queue updates, and instruction dispatch only where measurement shows a
-  real problem
-- Keep compile-time specialization for fixed storage shape and template limits
-
----
-
-## File Layout
-
-```
-zierra/
-├── build.zig
-├── build.zig.zon
-├── src/
-│   ├── config.zon               # Compile-time defaults imported with @import
-│   ├── main.zig                 # CLI entry point, arg parsing, run loop
-│   ├── root.zig                 # Library root (public API re-exports)
-│   ├── core/
-│   │   ├── instruction.zig      # Instruction enum, encode/decode, complement
-│   │   ├── soup.zig             # Memory arena, allocation, ownership
-│   │   ├── cpu.zig              # CPU state, per-instruction execution
-│   │   ├── template.zig         # Template pattern search algorithms
-│   │   ├── creature.zig         # Creature struct and lifecycle
-│   │   └── config.zig           # Config type and config.zon import
-│   ├── sim/
-│   │   ├── simulation.zig       # Top-level engine, main loop
-│   │   ├── scheduler.zig        # Slicer queue + Reaper queue
-│   │   ├── mutation.zig         # Cosmic rays, copy errors, flaws
-│   │   ├── genebank.zig         # Genotype registry and naming
-│   │   └── ancestor.zig         # The 80-instruction ancestor genome
-│   ├── persistence/
-│   │   ├── lineage.zig          # Lineage event log (JSONL)
-│   │   ├── snapshot.zig         # Periodic simulation snapshots
-│   │   └── state.zig            # Full save/load for pause/resume
-│   └── display/
-│       ├── notcurses.zig        # @cImport wrapper, usingnamespace re-export, defaults, err()
-│       ├── display.zig          # Notcurses init/teardown, render orchestration
-│       ├── soup_view.zig        # Soup memory map visualization
-│       ├── stats_view.zig       # Statistics dashboard
-│       ├── creature_view.zig    # Creature detail inspector
-│       └── size_histogram.zig   # Size-class distribution chart
-├── output/                      # Runtime output (gitignored)
-│   └── <run_id>/
-│       ├── lineage.jsonl        # Organism birth/death/replication events
-│       └── snapshots/           # Periodic simulation state snapshots
-├── plan/
-│   └── PLAN.md                  # This file
-└── reference/                   # (read-only) Tierra paper, Zig docs
-```
+Possible later exercises include alternative stable-storage pools, allocation indexing,
+buffered/threaded writers, and specialized dispatch. Preserve the established behavior
+with fixed-seed comparisons; do not add these before a measured need or explicit
+learning objective.
 
 ---
 
-## Data Contracts Between Modules
+## Planned File Layout
 
-This section defines the exact types and signatures that flow across module boundaries. Each boundary is a compile-time contract — the caller and callee must agree on these types.
+This is the intended destination; some modules do not exist yet.
 
-### Shared Types (used across many modules)
-
-```zig
-// Fundamental identifiers
-const CreatureId = u16;              // Index into creature storage ArrayList
-const GenotypeId = struct {
-    size: u16,                       // Genome length in instructions
-    code: [3]u8,                     // 3-letter label, e.g., "aaa"
-};
-
-// Memory allocation handle — returned by Soup.allocate(), stored by Creature
-const Allocation = struct {
-    start: u16,                      // Starting address in soup
-    len: u16,                        // Number of cells allocated
-};
+```text
+src/
+    config.zon
+    main.zig
+    root.zig                  # public API and core test reachability
+    core/
+        config.zig
+        instruction.zig
+        soup.zig
+        cpu.zig
+        template.zig
+        creature.zig
+    sim/
+        simulation.zig
+        scheduler.zig
+        ancestor.zig
+        mutation.zig
+        genebank.zig
+    persistence/
+        lineage.zig
+        snapshot.zig
+        state.zig
+    display/
+        notcurses.zig
+        display.zig
+        soup_view.zig
+        stats_view.zig
+        creature_view.zig
+        size_histogram.zig
+output/<run_id>/              # runtime output, gitignored
+    metadata.json
+    lineage.jsonl
+    snapshots/
+    checkpoints/
+plan/PLAN.md
+reference/                   # read-only documentation
+ziglings/                    # concept exercises
 ```
-
-The address type is intentionally fixed at `u16` while the soup is capped at `u16` capacity. This keeps
-the Tierra-like memory model explicit and lets wrap-around arithmetic stay simple.
-
-### Instruction → Soup
-
-The soup stores raw `u8` values. Only instruction.zig knows how to interpret them.
-
-```
-Soup.read(addr) → u8          -- raw byte from soup
-instruction.decode(u8) → Instruction   
-instruction.encode(Instruction) → u8 
-```
-
-The soup never decodes instructions itself. It is an opaque byte store. However, code that creates,
-copies, mutates, or serializes genotypes should treat only the low 5 bits as meaningful Tierra
-instruction data. This preserves the paper's model of 60,000 byte-addressed instructions while keeping
-the mutational surface at 300,000 bits.
-
-### Soup → CPU
-
-The CPU reads and writes the soup during execution. These are the calls the CPU makes:
-
-```
-soup.read(addr: u16) → u8                              -- fetch instruction or data (wraps around)
-soup.write(addr: u16, val: u8, writer_id: CreatureId) → !void  -- write with ownership check
-    errors: error.WriteProtected (cell not owned by writer_id)
-```
-
-The CPU calls `soup.read(cpu.ip)` to fetch the current instruction, then `instruction.decode()` to get the instruction value.
-
-### Soup → Creature (memory lifecycle)
-
-```
-soup.allocate(size: u16) → ?Allocation    -- returns null if no contiguous block found
-soup.free(alloc: Allocation) → void -- releases ownership of all cells in block
-soup.inoculate(code: []const u8, addr: u16, owner: CreatureId) → !Allocation
-    -- writes code into soup at addr, sets ownership for owner, and returns the seeded allocation
-```
-
-`Allocation` is the handle stored by `Creature` in `mother_alloc` and `daughter_alloc`. The concrete
-soup type is `Soup(comptime size)`, so allocation scans operate over fixed-size arrays.
-
-`Soup.inoculate` does not create a creature id or register the creature with any queue. It is a low-level
-seeding helper used by `Simulation.inoculate`, which creates the initial creature, calls
-`soup.inoculate`, stores the returned `Allocation` on that creature, and enqueues it for scheduling.
-
-### CPU → Template Search
-
-Template search is called by the CPU for `jmp`, `jmpb`, `call`, `adr`, `adrb`, `adrf`. The CPU passes the soup and its current position; template.zig reads the soup to find patterns.
-
-```
-template.searchForward(soup: *const Soup, start: u16, limit: u16) → ?u16
-template.searchBackward(soup: *const Soup, start: u16, limit: u16) → ?u16
-template.searchBidirectional(soup: *const Soup, start: u16, limit: u16) → ?u16
-```
-
-**Input contract:**
-
-- `start` points to the instruction *after* the addressing instruction (i.e., the first NOP of the template)
-- `limit` is `config.search_limit` — max distance to search
-- The function reads NOPs starting at `start` to build the template pattern, then searches for the complement
-- The search never matches the operand template itself: the forward scan starts past the last operand NOP and the backward scan starts before it (exact offsets in the jump pseudo-code above). A candidate template is read in forward order at every position, including the backward search
-- Complement means opposite NOP at each position: with `nop0 = 0` and `nop1 = 1`, position `i` matches when `operand[i] + candidate[i] == 1`
-
-**Output contract:**
-
-- Returns the address of the instruction *after* the end of the matched complementary template (i.e., where execution should resume)
-- Returns `null` if no complementary template is found within `limit`
-
-**On null return**, the calling CPU instruction sets `cpu.fl = 1` and the instruction is skipped (IP advances past the template NOPs).
-
-### Creature → CPU (composition)
-
-A `Creature` *contains* a `Cpu` — it's a direct struct embed, not a pointer.
-
-```zig
-const Creature = struct {
-    id: CreatureId,
-    cpu: Cpu,                           // Embedded, not referenced
-    mother_alloc: Allocation,
-    daughter_alloc: ?Allocation,        // Set by `mal`, cleared by `divide`
-    errors: u16,                        // Accumulated error count (affects reaper position)
-    instructions_executed: u64,
-    instructions_copied: u64,           // Count of mov_iab executions
-    parent_genotype: ?GenotypeId,
-    origin_time: u64,                   // Global inst_exec_c at birth
-};
-```
-
-The simulation passes `*Creature` to `cpu.step()`, which accesses `creature.mother_alloc`, `creature.daughter_alloc`, etc. when executing `mal`, `divide`, and `mov_iab`.
-
-### CPU.execute() → Simulation callbacks
-
-Certain instructions have side effects beyond the CPU and soup. The CPU signals these via a returned action enum rather than calling the simulation directly (keeps CPU decoupled from lifecycle management):
-
-```zig
-const ExecResult = union(enum) {
-    none,
-    divide: Allocation,                  // Memory block for the new creature
-    mal_request: u16,                    // Requested allocation size (from cx register)
-    error_condition,                     // An instruction generated an error flag
-    hard_instruction_success,            // Successfully executed a "hard" instruction (adr/mal)
-};
-```
-
-`execute` and `step` return `ExecResult`. A `.none` result means execution completed without requiring
-simulation-level work; it does not mean that the instruction had no CPU-local effects. Expected virtual
-machine faults return `.error_condition` rather than escaping through a Zig error union.
-
-The simulation loop inspects this action after each `step()` call to:
-
-- Create new creatures (`divide`)
-- Allocate memory and update `daughter_alloc` (`mal_request`)
-- Move creature in reaper queue (`error_condition` → up, `hard_instruction_success` → down)
-
-### Scheduler → Creature (queue membership)
-
-Slicer and reaper queues use intrusive linked list nodes embedded in the `Creature` struct:
-
-```zig
-const QueueNode = struct {
-    prev: ?*QueueNode,
-    next: ?*QueueNode,
-};
-
-// Added to Creature struct:
-slicer_node: QueueNode,    // Membership in slicer circular queue
-reaper_node: QueueNode,    // Membership in reaper linear queue
-```
-
-**Slicer contract:**
-
-```
-SlicerQueue.insert(creature: *Creature, after: *Creature) → void
-    -- inserts creature just ahead of `after` (so `after` runs next after creature)
-SlicerQueue.remove(creature: *Creature) → void
-SlicerQueue.next() → *Creature          -- advance to next creature in queue
-SlicerQueue.sliceSize(genome_size: u16, power: f32) → u16
-    -- returns number of instructions to execute: floor(genome_size ^ power)
-```
-
-**Reaper contract:**
-
-```
-ReaperQueue.addToBottom(creature: *Creature) → void
-ReaperQueue.killTop() → *Creature       -- returns creature to be killed
-ReaperQueue.moveUp(creature: *Creature) → void
-    -- constraint: only moves up if neighbor above has ≤ errors
-ReaperQueue.moveDown(creature: *Creature) → void
-    -- constraint: only moves down if neighbor below has ≥ errors
-```
-
-### Simulation → Mutation Engine
-
-The mutation engine is called at three points in the simulation:
-
-```
-// 1. Background mutation — called every N instructions (cosmic_rate)
-mutation.cosmicRay(soup: *Soup) → void
-    -- picks random address, flips one random low-5-bit genetic bit in that byte
-
-// 2. Copy error — called from mov_iab execution path
-mutation.maybeCopyError(val: u8) → u8
-    -- with probability 1/copy_error_rate, flips one random low-5-bit genetic bit
-    -- otherwise returns val unchanged
-
-// 3. Execution flaw — called from arithmetic/bit-flip instruction handlers
-mutation.maybeFlawResult(val: u16) → u16
-    -- with probability 1/flaw_rate, returns val ± 1
-    -- otherwise returns val unchanged
-    -- disabled when flaw_rate == 0
-```
-
-The mutation engine owns its own RNG state, seeded from `config.rng_seed`. It never reads or modifies
-simulation state beyond the specific value passed in.
-
-### Simulation → Genebank
-
-The genebank is notified at creature birth to register genotypes:
-
-```
-genebank.register(
-    genome: []const u8,              // Slice of soup memory for the creature's code
-    parent: ?GenotypeId,             // null for the ancestor
-    metadata: struct {
-        origin_time: u64,
-        first_repro_inst: u64,       // Instructions executed in first replication
-        first_repro_errors: u32,
-        first_repro_copies: u64,
-    },
-) → GenotypeId
-    -- If genome is already known, returns existing ID
-    -- If new, assigns next 3-letter code for this size class
-
-genebank.lookup(id: GenotypeId) → ?*const GenotypeRecord
-```
-
-**Breeds-true detection:** After a creature's first replication, the simulation compares the daughter's genome bytes to the genebank's stored genome for that genotype. If they match, `breeds_true` is set to `true` on the `GenotypeRecord`.
-
-### Simulation → Persistence (Lineage)
-
-The simulation emits lineage events at three points:
-
-```
-lineage_writer.record(event: LineageEvent) → void   // non-blocking, buffered
-
-const LineageEvent = union(enum) {
-    birth: struct {
-        parent_id: ?CreatureId,
-        child_id: CreatureId,
-        genotype_id: GenotypeId,
-        time: u64,                   // inst_exec_c
-    },
-    death: struct {
-        creature_id: CreatureId,
-        time: u64,
-        cause: enum { reaped, error_limit },
-    },
-    first_replication: struct {
-        creature_id: CreatureId,
-        genotype_id: GenotypeId,
-        time: u64,
-    },
-};
-```
-
-**Threading contract:** `record()` writes into a ring buffer. A background thread drains the buffer to disk as JSONL. The ring buffer is lock-free (single producer, single consumer). If the buffer is full, `record()` blocks until space is available (backpressure).
-
-### Simulation → Persistence (Snapshots)
-
-```
-snapshot.takeSnapshot(sim: *const Simulation) → SnapshotData
-    -- Reads simulation state (population, genotype census, free memory, inst_exec_c)
-    -- This is a fast, read-only operation on the simulation
-
-const SnapshotData = struct {
-    time: u64,                          // inst_exec_c
-    population: u32,
-    free_memory: u16,
-    genotype_census: []GenotypeCount,   // sorted by count descending
-    size_histogram: []SizeCount,
-};
-
-const GenotypeCount = struct { id: GenotypeId, count: u32 };
-const SizeCount = struct { size: u16, count: u32 };
-```
-
-The simulation calls `takeSnapshot()` every `config.snapshot_interval` instructions and hands the
-`SnapshotData` to a background writer thread.
-
-### Simulation → Display
-
-The display reads simulation state but never modifies it:
-
-```
-display.render(sim: *const Simulation) → !void
-    -- Reads: soup.memory, soup.owner, stats, creature list, slicer/reaper state
-    -- Writes: only to notcurses planes (screen output)
-
-display.pollInput() → ?InputEvent
-    -- Non-blocking check for user input (pause, quit, select creature, etc.)
-
-const InputEvent = union(enum) {
-    quit,
-    pause_toggle,
-    select_creature: CreatureId,
-    // ... extensible as needed
-};
-```
-
-**Timing contract:** The simulation calls `display.render()` at a throttled rate (e.g., every N ticks or wall-clock interval), not every instruction. The display must handle being called with any valid simulation state.
-
-### Config → Everything
-
-`Config` is known at compile time and determines both concrete storage types and behavior knobs. It is
-derived from `src/config.zon` through `@import`:
-
-```
-const cfg = config.config;
-const Sim = Simulation(cfg);
-Sim.init() → Sim
-    -- Instantiates Soup(cfg.soup_size) with in-struct arrays
-    -- Passes mutation rates to MutationEngine.init()
-    -- Specializes CPU/template search with cfg.search_limit
-    -- Passes cfg.slicer_power to SlicerQueue
-    -- Passes cfg.reaper_threshold for memory pressure check
-    -- Passes cfg.snapshot_interval to SnapshotWriter
-    -- Passes cfg.rng_seed to MutationEngine and any other RNG consumers
-```
-
-No module modifies `Config` after startup. It is effectively immutable for the lifetime of the
-simulation; changing it means editing `src/config.zon` and rebuilding.
-
----
 
 ## Testing Strategy
 
-Every module includes `test` blocks at the bottom of the file. Tests fall into three tiers:
+Tests should demonstrate a rule or reveal a boundary failure. Start with small,
+hand-checkable soups and deterministic CPU states; avoid tests that simply mirror
+the implementation.
 
-1. **Unit tests** (per-module, no external dependencies):
-  - Instruction encoding, CPU arithmetic, stack behavior
-  - Soup allocation, ownership enforcement
-  - Template search correctness
-  - Queue ordering (slicer, reaper)
-  - Mutation determinism with fixed seeds
-  - Config: import `.zon`, default values match expectations, invalid values fail validation
-  - Config validation: comptime validation for fixed-size simulation shapes
-  - Lineage: event serialization round-trip, JSONL formatting correctness
-2. **Integration tests** (cross-module):
-  - Ancestor replicates itself correctly (CPU + Soup + Creature)
-  - Reaper triggers at memory threshold (Simulation + Scheduler)
-  - Mutations produce non-identical offspring (Mutation + CPU + Soup)
-  - Full simulation run for N instructions produces expected population dynamics
-  - Lineage: run simulation, verify log contains birth/death events with correct parent→child relationships
-  - Snapshots: run for N instructions, verify snapshot files written at expected intervals
-  - Save/load: save simulation state, load into new instance, verify state matches
-3. **Display tests** (require notcurses):
-  - Init/deinit lifecycle
-  - View rendering (can be tested with notcurses in headless/testing mode)
+1. Unit tests: config validation, all opcode round trips, arithmetic/stack boundaries,
+   atomic soup operations, search/skip semantics, queue invariants, deterministic mutation,
+   genotype canonicalization, and serialization.
+2. Integration tests: mutation-free ancestor replication across generations, correct
+   ownership transfer/reaping, exact run budgets, ordered lineage, snapshot intervals,
+   and deterministic checkpoint continuation.
+3. Display tests: compilation/linking and pure view mapping, plus terminal lifecycle
+   checks in an appropriate terminal environment.
 
-Run with: `zig build test` (unit + integration), `zig build test-integration` (display tests)
+Wire intended modules into test roots: Zig does not recursively discover every
+`test` block in every source file. Keep external display dependencies out of the core
+test graph. Use `std.testing.allocator` for allocation-bearing tests to expose leaks.
 
----
+`zig build test` is the existing command and should grow to cover core unit and
+integration tests. Add `zig build test-display` in Phase 6; there is no current
+`test-integration` step.
+
+Do not assert that evolution must produce a particular population shape or that every
+daughter must differ. Mutations are stochastic, and a bit flip can later be reversed.
+Use forced decisions for specific mutation rules, fixed seeds for repeatable integration
+runs, and structural invariants for larger runs.
 
 ## Key Design Decisions
 
-
-| Decision             | Choice                                                                                                            | Rationale                                                                                                            |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Instruction storage  | `u8` soup cells with low 5 bits used                                                                              | Matches Tierra's byte-addressed soup while preserving the 32-instruction genetic alphabet                            |
-| Mutation bit range   | Only bit positions `0..4` of each instruction byte                                                                | Matches the paper's 60,000 instructions totaling 300,000 mutable bits                                                |
-| Soup addressing      | `u16`                                                                                                             | Supports up to 64K soups; matches the paper's ~60K default and keeps memory compact                                  |
-| Soup storage         | `Soup(comptime size)` with `[size]u8` and `[size]?CreatureId`                                                     | Moves arena shape and capacity to compile time; no allocator required for the core memory soup                       |
-| Config               | One `Config` object from `src/config.zon` imported with `@import`                                                 | Keeps shape and behavior values in one source of truth; changing config means rebuilding                             |
-| Creature storage     | ArrayList + free list                                                                                             | O(1) access by ID; IDs are indices                                                                                   |
-| Queue implementation | Intrusive doubly-linked list                                                                                      | O(1) insert/remove/reorder for slicer and reaper                                                                     |
-| RNG                  | `std.Random.Xoshiro256`                                                                                           | Fast, good statistical properties, seedable                                                                          |
-| Display binding      | `@cImport` + `pub usingnamespace` re-export, thin `err()`/default wrappers, `linkSystemLibrary("notcurses-core")` | Zero-cost FFI; single wrapper module re-exports all C symbols with Zig-friendly error conversion and struct defaults |
-| Lineage tracking     | Append-only JSONL event log, background thread flush                                                              | Streamable, greppable, reconstructable into phylogenetic trees; async avoids simulation stalls                       |
-| Snapshot interval    | Configurable via `config.snapshot_interval`                                                                       | Lets user trade disk space for temporal resolution                                                                   |
-| Error handling       | Zig error unions                                                                                                  | Natural fit; CPU faults map to error returns                                                                         |
+| Decision | Initial choice | Why |
+| --- | --- | --- |
+| Instruction storage | Canonical low-5-bit instructions in byte cells | Tierra's byte addressing and 32-opcode alphabet |
+| Addressing | Circular CPU access, linear allocations, `u16` addresses | Explicit bounds without split allocation handles |
+| Register arithmetic | Defined 16-bit wrapping, separate from address normalization | Mutated programs cannot rely on host overflow behavior |
+| Config | Typed compile-time object from one ZON file | One production source of truth; small test configurations |
+| Creature storage | Stable objects, slot lookup, free-slot list | Intrusive pointers survive lookup-table growth |
+| Identity | Reusable slot ID plus persistent organism ID | Fast ownership checks and unambiguous lineage |
+| Queues | Separate intrusive slicer/reaper nodes | Constant-time linking with explicit lifetime rules |
+| RNG | Separate explicitly seeded streams | Reproducible evolution independent of observation |
+| Genebank | Owned canonical genomes and byte comparison | Stable identity despite soup changes/hash collisions |
+| Persistence | Synchronous buffered output first; data-only versioned checkpoints | Learn ownership and errors before concurrency |
+| Display | Optional C import and module-level linking | Headless core remains usable without notcurses |
+| Error handling | VM outcomes; host failures use error unions | Preserve simulated faults while surfacing infrastructure errors |

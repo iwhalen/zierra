@@ -13,6 +13,7 @@ const template_module = @import("template.zig");
 const count_nops_at = template_module.count_nops_at;
 const wrap_increment = template_module.wrap_increment;
 const search_bidirectional = template_module.search_bidirectional;
+const search_backward = template_module.search_backward;
 const pattern_length_at = template_module.pattern_length_at;
 
 pub const StackError = error{ StackOverflow, StackUnderflow };
@@ -251,7 +252,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             switch (skip_instruction) {
                 Instruction.jmp, Instruction.jmpb, Instruction.call, Instruction.adr, Instruction.adrb, Instruction.adrf => {
                     const template_start = wrap_increment(skip_address, 1, soup.len);
-                    const template_length = count_nops_at(soup, template_start, soup.len) orelse 0;
+                    const template_length = count_nops_at(soup, template_start, soup.len);
                     self.ip = wrap_increment(template_start, template_length, soup.len);
                 },
                 else => {
@@ -262,25 +263,45 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             return ExecResult.none;
         }
 
-        pub fn jmp(self: *Self, soup: anytype) ExecResult {
-            const search_start = wrap_increment(self.ip, 1, soup.len);
-            const pattern_length = pattern_length_at(soup, search_start, search_limit) orelse 0;
+        pub fn execute_jump(self: *Self, soup: anytype, comptime search_fn: anytype) ExecResult {
+            self.fl = 0;
 
+            const search_start = wrap_increment(self.ip, 1, soup.len);
+            const pattern_length = pattern_length_at(soup, search_start, search_limit);
+
+            // No NOPs were found, so we jump to the address in bx.
             if (pattern_length == 0) {
                 self.ip = wrap_increment(self.bx, 0, soup.len);
                 return ExecResult.none;
             }
 
-            const search_result = search_bidirectional(soup, search_start, search_limit);
+            // Invalid pattern found, skip the operand.
+            if (pattern_length == null) {
+                const operand_length = count_nops_at(soup, search_start, soup.len);
+                self.advance_ip(1 + operand_length, soup.len);
+                self.fl = 1;
+                return ExecResult.error_condition;
+            }
 
+            const search_result = search_fn(soup, search_start, search_limit);
+
+            // No matching template found, skip the operand.
             if (search_result == null) {
-                self.advance_ip(1 + pattern_length, soup.len);
+                self.advance_ip(1 + pattern_length.?, soup.len);
                 self.fl = 1;
                 return ExecResult.error_condition;
             }
 
             self.ip = search_result.?;
             return ExecResult.none;
+        }
+
+        pub fn jmp(self: *Self, soup: anytype) ExecResult {
+            return execute_jump(self, soup, search_bidirectional);
+        }
+
+        pub fn jmpb(self: *Self, soup: anytype) ExecResult {
+            return execute_jump(self, soup, search_backward);
         }
     };
 }
@@ -330,3 +351,34 @@ test "advance ip uses wrapped address" {
 //
 
 // TODO
+
+test "empty jumps use normalized bx and clear the error flag" {
+    var soup = Soup(7){};
+    soup.memory[0] = Instruction.inc_a;
+    soup.memory[6] = Instruction.jmp;
+
+    inline for (.{ false, true }) |backward| {
+        var cpu = CPU(5, 100){ .ip = 6, .bx = 17, .fl = 1 };
+        const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+
+        try testing.expect(result == .none);
+        try testing.expectEqual(@as(u16, 3), cpu.ip);
+        try testing.expectEqual(@as(u8, 0), cpu.fl);
+        try testing.expectEqual(@as(u16, 17), cpu.bx);
+    }
+}
+
+test "failed jumps skip a nonempty operand and set the error flag" {
+    var soup = Soup(7){};
+    soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.nop_0, Instruction.inc_a, Instruction.inc_b, Instruction.zero, Instruction.ret };
+
+    inline for (.{ false, true }) |backward| {
+        var cpu = CPU(5, 100){ .bx = 5 };
+        const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+
+        try testing.expect(result == .error_condition);
+        try testing.expectEqual(@as(u16, 3), cpu.ip);
+        try testing.expectEqual(@as(u8, 1), cpu.fl);
+        try testing.expectEqual(@as(u16, 5), cpu.bx);
+    }
+}

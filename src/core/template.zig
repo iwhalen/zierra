@@ -45,10 +45,6 @@ pub fn count_nops_at(soup: anytype, start: u16, limit: u16) u16 {
 pub fn pattern_length_at(soup: anytype, start: u16, limit: u16) ?u16 {
     const length = count_nops_at(soup, start, limit);
 
-    if (length == 0) {
-        return null;
-    }
-
     if (length >= limit / 2) {
         return null;
     }
@@ -75,6 +71,8 @@ fn matches_complement_at(soup: anytype, pattern_start: u16, pattern_length: u16,
 
 pub fn search_forward(soup: anytype, start: u16, limit: u16) ?u16 {
     const pattern_length = pattern_length_at(soup, start, limit) orelse return null;
+    if (pattern_length == 0) return null;
+
     const match_start = search_forward_match(soup, start, pattern_length, limit) orelse return null;
 
     return wrap_increment(match_start, pattern_length, soup.len);
@@ -98,6 +96,8 @@ fn search_forward_match(soup: anytype, start: u16, pattern_length: u16, limit: u
 
 pub fn search_backward(soup: anytype, start: u16, limit: u16) ?u16 {
     const pattern_length = pattern_length_at(soup, start, limit) orelse return null;
+    if (pattern_length == 0) return null;
+
     const match_start = search_backward_match(soup, start, pattern_length, limit) orelse return null;
 
     return wrap_increment(match_start, pattern_length, soup.len);
@@ -130,6 +130,8 @@ fn backward_distance(from: u16, to: u16, maximum: u16) u16 {
 
 pub fn search_bidirectional(soup: anytype, start: u16, limit: u16) ?u16 {
     const pattern_length = pattern_length_at(soup, start, limit) orelse return null;
+    if (pattern_length == 0) return null;
+
     const forward_match = search_forward_match(soup, start, pattern_length, limit);
     const backward_match = search_backward_match(soup, start, pattern_length, limit);
 
@@ -325,4 +327,36 @@ test "search bidirectional" {
 
     try testing.expectEqual(3, search_bidirectional(soup_simple, 5, 100));
     try testing.expectEqual(11, search_bidirectional(soup_simple, 1, 100));
+}
+
+test "pattern length distinguishes empty valid and invalid operands" {
+    var soup = Soup(5){};
+    soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.nop_1, Instruction.inc_a, null };
+
+    try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, 3, 100));
+    try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, 4, 100));
+    try testing.expectEqual(@as(?u16, 2), pattern_length_at(&soup, 1, 100));
+    // The current extraction rule rejects lengths at least half the limit.
+    try testing.expectEqual(@as(?u16, null), pattern_length_at(&soup, 1, 4));
+}
+
+test "searches reject empty operands" {
+    var soup = Soup(7){};
+    soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.nop_1, Instruction.inc_a, Instruction.nop_1, Instruction.nop_0, null };
+
+    for ([_]u16{ 0, 3, 6 }) |start| {
+        try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, start, 100));
+        try testing.expectEqual(@as(?u16, null), search_forward(&soup, start, 100));
+        try testing.expectEqual(@as(?u16, null), search_backward(&soup, start, 100));
+        try testing.expectEqual(@as(?u16, null), search_bidirectional(&soup, start, 100));
+    }
+}
+
+test "searches with zero budget return no match" {
+    var soup = Soup(5){};
+    soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.inc_a, Instruction.nop_1, null };
+
+    try testing.expectEqual(@as(?u16, null), search_forward(&soup, 1, 0));
+    try testing.expectEqual(@as(?u16, null), search_backward(&soup, 1, 0));
+    try testing.expectEqual(@as(?u16, null), search_bidirectional(&soup, 1, 0));
 }
