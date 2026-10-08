@@ -7,4 +7,4 @@ A work in progress implementation of [Tierra](https://en.wikipedia.org/wiki/Tier
 
 Follow my blog series for this project:
 
-1. [iwhalen.com/zierra_1/](https://iwhalen.com/zierra_1/)
+1. [iwhalen.com/zierra-1/](https://iwhalen.com/zierra-1/)
