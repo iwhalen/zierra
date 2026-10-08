@@ -14,6 +14,7 @@ const count_nops_at = template_module.count_nops_at;
 const wrap_increment = template_module.wrap_increment;
 const search_bidirectional = template_module.search_bidirectional;
 const search_backward = template_module.search_backward;
+const search_forward = template_module.search_forward;
 const pattern_length_at = template_module.pattern_length_at;
 
 pub const StackError = error{ StackOverflow, StackUnderflow };
@@ -138,9 +139,9 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                 Instruction.call => return self.call(soup),
                 Instruction.ret => return self.ret(soup.len),
                 // Address to register
-                Instruction.adr => unreachable,
-                Instruction.adrb => unreachable,
-                Instruction.adrf => unreachable,
+                Instruction.adr => return self.adr(soup),
+                Instruction.adrb => return self.adrb(soup),
+                Instruction.adrf => return self.adrf(soup),
                 // Copy
                 Instruction.mov_iab => unreachable,
                 // Allocation
@@ -364,6 +365,53 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
 
             self.ip = wrap_increment(address, 0, soup_len);
             return ExecResult.none;
+        }
+
+        pub fn store_address(self: *Self, soup: anytype, comptime search_fn: anytype) ExecResult {
+            const search_start = wrap_increment(self.ip, 1, soup.len);
+            const pattern_length = pattern_length_at(soup, search_start);
+
+            // Operand is empty, continue on without setting error condition.
+            if (pattern_length == 0) {
+                self.advance_ip(1, soup.len);
+                return ExecResult.none;
+            }
+
+            // Operand is invalid, continue after template and set error.
+            if (pattern_length == null) {
+                const operand_length = count_nops_at(soup, search_start, soup.len);
+                self.ip = wrap_increment(search_start, operand_length, soup.len);
+                self.fl = 1;
+                return ExecResult.error_condition;
+            }
+
+            const search_result = search_fn(soup, search_start, search_limit);
+
+            // No matching template found, skip the operand.
+            if (search_result == null) {
+                self.ip = wrap_increment(search_start, pattern_length.?, soup.len);
+                self.fl = 1;
+                return ExecResult.error_condition;
+            }
+
+            self.ax = search_result.?;
+            self.cx = pattern_length.?;
+
+            self.ip = wrap_increment(search_start, pattern_length.?, soup.len);
+
+            return ExecResult.hard_instruction_success;
+        }
+
+        pub fn adr(self: *Self, soup: anytype) ExecResult {
+            return self.store_address(soup, search_bidirectional);
+        }
+
+        pub fn adrb(self: *Self, soup: anytype) ExecResult {
+            return self.store_address(soup, search_backward);
+        }
+
+        pub fn adrf(self: *Self, soup: anytype) ExecResult {
+            return self.store_address(soup, search_forward);
         }
     };
 }
