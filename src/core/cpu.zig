@@ -104,8 +104,6 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
         }
 
         pub fn execute(self: *Self, instruction: Instruction, soup: anytype, creature: anytype) ExecResult {
-            _ = creature;
-
             self.fl = 0;
 
             switch (instruction) {
@@ -143,7 +141,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                 Instruction.adrb => return self.adrb(soup),
                 Instruction.adrf => return self.adrf(soup),
                 // Copy
-                Instruction.mov_iab => unreachable,
+                Instruction.mov_iab => return self.mov_iab(soup, creature),
                 // Allocation
                 Instruction.mal => unreachable,
                 // Divide
@@ -412,6 +410,26 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
 
         pub fn adrf(self: *Self, soup: anytype) ExecResult {
             return self.store_address(soup, search_forward);
+        }
+
+        pub fn mov_iab(self: *Self, soup: anytype, creature: anytype) ExecResult {
+            const address_ax = wrap_increment(self.ax, 0, soup.len);
+            const address_bx = wrap_increment(self.bx, 0, soup.len);
+            const instruction = soup.read(address_bx).?; // Should never be null at this point.
+
+            var copy_increment: u16 = 1;
+            var return_value = ExecResult.none;
+
+            soup.write(address_ax, instruction, creature.id) catch {
+                return_value = ExecResult.error_condition;
+                self.fl = 1;
+                copy_increment = 0;
+            };
+
+            creature.instructions_copied += copy_increment;
+            self.advance_ip(1, soup.len);
+
+            return return_value;
         }
     };
 }
