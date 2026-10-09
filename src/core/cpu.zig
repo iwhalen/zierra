@@ -22,15 +22,15 @@ pub const StackError = error{ StackOverflow, StackUnderflow };
 // Tracks if the execution result requires any extra work to be done
 // by the simulation.
 pub const ExecResult = union(enum) {
-    // True if no extra work is needed from the simulation.
+    // No extra work is needed from the simulation.
     none,
     // Memory allocation request for new creature.
     divide: Allocation,
     // Creature request for memory.
     mal_request: u16,
-    // True if an instruction generated an error flag.
+    // Instruction generated an error flag.
     error_condition,
-    // True if a creature successful executed a hard instruction (adr/mal).
+    // Creature successfully executed a hard instruction (adr/mal).
     hard_instruction_success,
 };
 
