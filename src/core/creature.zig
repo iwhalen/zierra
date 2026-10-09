@@ -11,7 +11,7 @@ pub fn Creature(comptime CpuType: type) type {
         cpu: CpuType,
 
         mother_alloc: Allocation,
-        daughter_alloc: Allocation,
+        daughter_alloc: ?Allocation,
 
         errors: u16 = 0,
         instructions_executed: u16 = 0,

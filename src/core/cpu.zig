@@ -28,7 +28,7 @@ pub const ExecResult = union(enum) {
     // Memory allocation request for new creature.
     divide: Allocation,
     // Creature request for memory.
-    mal_request,
+    mal_request: u16,
     // True if an instruction generated an error flag.
     error_condition,
     // True if a creature successful executed a hard instruction (adr/mal).
@@ -143,9 +143,9 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                 // Copy
                 Instruction.mov_iab => return self.mov_iab(soup, creature),
                 // Allocation
-                Instruction.mal => unreachable,
+                Instruction.mal => return self.mal(soup),
                 // Divide
-                Instruction.divide => unreachable,
+                Instruction.divide => return self.divide(soup, creature),
             }
         }
 
@@ -431,6 +431,22 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
 
             return return_value;
         }
+
+        pub fn mal(self: *Self, soup: anytype) ExecResult {
+            self.advance_ip(1, soup.len);
+            return ExecResult{ .mal_request = self.cx };
+        }
+
+        pub fn divide(self: *Self, soup: anytype, creature: anytype) ExecResult {
+            self.advance_ip(1, soup.len);
+
+            if (creature.daughter_alloc == null) {
+                self.fl = 1;
+                return ExecResult.error_condition;
+            }
+
+            return ExecResult{ .divide = creature.daughter_alloc.? };
+        }
     };
 }
 
@@ -475,7 +491,7 @@ test "advance ip uses wrapped address" {
 }
 
 //
-// Disgusting AI generated unit tests.
+// AI generated unit tests.
 //
 
 test "empty jumps use normalized bx and clear the error flag" {
