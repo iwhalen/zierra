@@ -22,6 +22,6 @@ For the full standard library of Zig, see the subdirectories of ./reference/std
 
 Use this for documentation purposes and understanding tooling we can use to accomplish the implementation.
 
-Be sure to reference the plan in @plan/PLAN.md when appropriate.
+Be sure to reference the plan in plan/PLAN.md when appropriate.
 
-IMPORTANT: Do not make any changes to the @reference/ directory.
+IMPORTANT: Do not make any changes to the reference/ directory.
