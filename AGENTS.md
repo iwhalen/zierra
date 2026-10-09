@@ -12,6 +12,10 @@ When possible, point to an exercise in ./ziglings that will help with implementi
 
 For a paper in LaTex format outlining the full Tierra simulation, see ./reference/tierra_paper.tex
 
+When the paper is truly ambiguous, refer to the implementation here: ./reference/Tierra/ 
+
+IMPORTANT: this is not a 1-1 rewrite of the reference implementation. Best Zig practices should always be followed.
+
 For the full Zig language reference, see ./reference/langref.html.in
 
 For the full standard library of Zig, see the subdirectories of ./reference/std
