@@ -57,10 +57,7 @@ pub fn encode(instruction: Instruction) u8 {
 pub fn is_nop(value: anytype) bool {
     const T = @TypeOf(value);
 
-    if (comptime @typeInfo(T) == .optional) {
-        const inner = value orelse return false;
-        return is_nop(inner);
-    } else if (T == Instruction) {
+    if (T == Instruction) {
         return (value == Instruction.nop_0) or (value == Instruction.nop_1);
     } else if (T == u8 or comptime @typeInfo(T) == .int) {
         return (decode(value) == Instruction.nop_0) or (decode(value) == Instruction.nop_1);
@@ -69,12 +66,8 @@ pub fn is_nop(value: anytype) bool {
     }
 }
 
-pub fn complement(value: ?Instruction) ?Instruction {
-    if (value == null) {
-        return value;
-    }
-
-    return switch (value.?) {
+pub fn complement(value: Instruction) Instruction {
+    return switch (value) {
         Instruction.nop_0 => Instruction.nop_1,
         Instruction.nop_1 => Instruction.nop_0,
         else => value,

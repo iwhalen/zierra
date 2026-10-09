@@ -12,13 +12,13 @@ const Allocation = soup_module.Allocation;
 const template_module = @import("template.zig");
 const count_nops_at = template_module.count_nops_at;
 const wrap_increment = template_module.wrap_increment;
+const wrap_decrement = template_module.wrap_decrement;
 const search_bidirectional = template_module.search_bidirectional;
 const search_backward = template_module.search_backward;
 const search_forward = template_module.search_forward;
 const pattern_length_at = template_module.pattern_length_at;
 
 pub const StackError = error{ StackOverflow, StackUnderflow };
-pub const ExecutionError = error{NullInstructionError};
 
 // Tracks if the execution result requires any extra work to be done
 // by the simulation.
@@ -86,17 +86,8 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             return self.stack[self.sp];
         }
 
-        pub fn step(self: *Self, soup: anytype, creature: anytype) !ExecResult {
-            const read: ?Instruction = soup.read(self.ip);
-            var instruction: Instruction = undefined;
-
-            if (read == null) {
-                return ExecutionError.NullInstructionError;
-            } else {
-                instruction = read;
-            }
-
-            const result = self.execute(instruction, soup, creature);
+        pub fn step(self: *Self, soup: anytype, creature: anytype) ExecResult {
+            const result = self.execute(soup.read(self.ip), soup, creature);
 
             creature.instructions_executed += 1;
 
@@ -155,100 +146,100 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
 
         pub fn nop(self: *Self, soup_len: u16) ExecResult {
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn or1(self: *Self, soup_len: u16) ExecResult {
             self.cx ^= 1;
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn shl(self: *Self, soup_len: u16) ExecResult {
             self.cx <<= 1;
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn zero(self: *Self, soup_len: u16) ExecResult {
             self.cx = 0;
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn sub_ab(self: *Self, soup_len: u16) ExecResult {
-            self.cx = self.ax - self.bx;
+            self.cx = self.ax -% self.bx;
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn sub_ac(self: *Self, soup_len: u16) ExecResult {
-            self.ax = self.ax - self.cx;
+            self.ax = self.ax -% self.cx;
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn inc_a(self: *Self, soup_len: u16) ExecResult {
-            self.ax += 1;
+            self.ax +%= 1;
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn inc_b(self: *Self, soup_len: u16) ExecResult {
-            self.bx += 1;
+            self.bx +%= 1;
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn dec_c(self: *Self, soup_len: u16) ExecResult {
-            self.cx -= 1;
+            self.cx -%= 1;
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn inc_c(self: *Self, soup_len: u16) ExecResult {
-            self.cx += 1;
+            self.cx +%= 1;
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn mov_cd(self: *Self, soup_len: u16) ExecResult {
             self.dx = self.cx;
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn mov_ab(self: *Self, soup_len: u16) ExecResult {
             self.bx = self.ax;
             self.advance_ip(1, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn execute_push(self: *Self, soup_len: u16, value: u16) ExecResult {
             self.advance_ip(1, soup_len);
 
             self.push(value) catch {
-                return ExecResult.error_condition;
+                return .{ .error_condition = {} };
             };
 
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn execute_pop(self: *Self, soup_len: u16, destination: *u16) ExecResult {
             self.advance_ip(1, soup_len);
 
             const result = self.pop() catch {
-                return ExecResult.error_condition;
+                return .{ .error_condition = {} };
             };
 
             destination.* = result;
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn if_cz(self: *Self, soup: anytype) ExecResult {
             if (self.cx == 0) {
                 self.advance_ip(1, soup.len);
-                return ExecResult.none;
+                return .{ .none = {} };
             }
 
             const skip_address = wrap_increment(self.ip, 1, soup.len);
@@ -265,7 +256,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                 },
             }
 
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn execute_jump(self: *Self, soup: anytype, comptime search_fn: anytype) ExecResult {
@@ -275,7 +266,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             // No NOPs were found, so we jump to the address in bx.
             if (pattern_length == 0) {
                 self.ip = wrap_increment(self.bx, 0, soup.len);
-                return ExecResult.none;
+                return .{ .none = {} };
             }
 
             // Invalid pattern found, skip the operand.
@@ -283,7 +274,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                 const operand_length = count_nops_at(soup, search_start, soup.len);
                 self.ip = wrap_increment(search_start, operand_length, soup.len);
                 self.fl = 1;
-                return ExecResult.error_condition;
+                return .{ .error_condition = {} };
             }
 
             const search_result = search_fn(soup, search_start, search_limit);
@@ -292,11 +283,11 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             if (search_result == null) {
                 self.ip = wrap_increment(search_start, pattern_length.?, soup.len);
                 self.fl = 1;
-                return ExecResult.error_condition;
+                return .{ .error_condition = {} };
             }
 
             self.ip = search_result.?;
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn jmp(self: *Self, soup: anytype) ExecResult {
@@ -315,7 +306,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             if (pattern_length == null) {
                 self.advance_ip(1, soup.len);
                 self.fl = 1;
-                return ExecResult.error_condition;
+                return .{ .error_condition = {} };
             }
 
             const return_address = wrap_increment(search_start, pattern_length.?, soup.len);
@@ -328,11 +319,11 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                     // Stack was too full to push return address.
                     self.ip = return_address;
                     self.fl = 1;
-                    return ExecResult.error_condition;
+                    return .{ .error_condition = {} };
                 };
 
                 self.ip = return_address;
-                return ExecResult.none;
+                return .{ .none = {} };
             }
 
             const search_result = search_bidirectional(soup, search_start, search_limit);
@@ -341,28 +332,28 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             if (search_result == null) {
                 self.ip = return_address;
                 self.fl = 1;
-                return ExecResult.error_condition;
+                return .{ .error_condition = {} };
             }
 
             self.push(return_address) catch {
                 // Stack was too full to push return address.
                 self.ip = return_address;
                 self.fl = 1;
-                return ExecResult.error_condition;
+                return .{ .error_condition = {} };
             };
 
             self.ip = search_result.?;
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn ret(self: *Self, soup_len: u16) ExecResult {
             const address = self.pop() catch {
                 self.advance_ip(1, soup_len);
-                return ExecResult.error_condition;
+                return .{ .error_condition = {} };
             };
 
             self.ip = wrap_increment(address, 0, soup_len);
-            return ExecResult.none;
+            return .{ .none = {} };
         }
 
         pub fn store_address(self: *Self, soup: anytype, comptime search_fn: anytype) ExecResult {
@@ -372,7 +363,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             // Operand is empty, continue on without setting error condition.
             if (pattern_length == 0) {
                 self.advance_ip(1, soup.len);
-                return ExecResult.none;
+                return .{ .none = {} };
             }
 
             // Operand is invalid, continue after template and set error.
@@ -380,7 +371,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                 const operand_length = count_nops_at(soup, search_start, soup.len);
                 self.ip = wrap_increment(search_start, operand_length, soup.len);
                 self.fl = 1;
-                return ExecResult.error_condition;
+                return .{ .error_condition = {} };
             }
 
             const search_result = search_fn(soup, search_start, search_limit);
@@ -389,7 +380,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             if (search_result == null) {
                 self.ip = wrap_increment(search_start, pattern_length.?, soup.len);
                 self.fl = 1;
-                return ExecResult.error_condition;
+                return .{ .error_condition = {} };
             }
 
             self.ax = search_result.?;
@@ -397,7 +388,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
 
             self.ip = wrap_increment(search_start, pattern_length.?, soup.len);
 
-            return ExecResult.hard_instruction_success;
+            return .{ .hard_instruction_success = {} };
         }
 
         pub fn adr(self: *Self, soup: anytype) ExecResult {
@@ -415,13 +406,13 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
         pub fn mov_iab(self: *Self, soup: anytype, creature: anytype) ExecResult {
             const address_ax = wrap_increment(self.ax, 0, soup.len);
             const address_bx = wrap_increment(self.bx, 0, soup.len);
-            const instruction = soup.read(address_bx).?; // Should never be null at this point.
+            const instruction = soup.read(address_bx);
 
             var copy_increment: u16 = 1;
-            var return_value = ExecResult.none;
+            var return_value = ExecResult{ .none = {} };
 
             soup.write(address_ax, instruction, creature.id) catch {
-                return_value = ExecResult.error_condition;
+                return_value = ExecResult{ .error_condition = {} };
                 self.fl = 1;
                 copy_increment = 0;
             };
@@ -442,7 +433,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
 
             if (creature.daughter_alloc == null) {
                 self.fl = 1;
-                return ExecResult.error_condition;
+                return .{ .error_condition = {} };
             }
 
             return ExecResult{ .divide = creature.daughter_alloc.? };
@@ -494,20 +485,265 @@ test "advance ip uses wrapped address" {
 // AI generated unit tests.
 //
 
+fn test_creature(comptime stack_depth: u16, comptime search_limit: u16) Creature(CPU(stack_depth, search_limit)) {
+    return .{
+        .id = 1,
+        .cpu = CPU(stack_depth, search_limit){},
+        .mother_alloc = .{ .start = 0, .len = 1 },
+        .daughter_alloc = null,
+        .parent_genotype = null,
+        .origin_time = 0,
+    };
+}
+
+fn run_opcode(creature: anytype, soup: anytype, opcode: Instruction) ExecResult {
+    soup.memory[creature.cpu.ip] = opcode;
+    return creature.cpu.step(soup, creature);
+}
+
+test "both NOP opcodes advance once and clear the previous flag" {
+    var soup = Soup(3){};
+    var creature = test_creature(5, 3);
+    creature.cpu = .{ .ip = 2, .fl = 1 };
+
+    try testing.expect(run_opcode(&creature, &soup, .nop_0) == .none);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.ip);
+    try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
+    try testing.expect(run_opcode(&creature, &soup, .nop_1) == .none);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 2), creature.instructions_executed);
+}
+
+test "bit operations change only cx and discard shifted high bits" {
+    var soup = Soup(5){};
+    var creature = test_creature(5, 5);
+    creature.cpu = .{ .ax = 7, .bx = 8, .cx = 0x8001, .dx = 9 };
+
+    try testing.expect(run_opcode(&creature, &soup, .or1) == .none);
+    try testing.expectEqual(@as(u16, 0x8000), creature.cpu.cx);
+    try testing.expect(run_opcode(&creature, &soup, .or1) == .none);
+    try testing.expectEqual(@as(u16, 0x8001), creature.cpu.cx);
+    try testing.expect(run_opcode(&creature, &soup, .shl) == .none);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.cx);
+    try testing.expect(run_opcode(&creature, &soup, .zero) == .none);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.cx);
+    try testing.expectEqual(@as(u16, 7), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 8), creature.cpu.bx);
+    try testing.expectEqual(@as(u16, 9), creature.cpu.dx);
+    try testing.expectEqual(@as(u16, 4), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 4), creature.instructions_executed);
+}
+
+test "subtractions place the result in the specified register" {
+    var soup = Soup(4){};
+    var creature = test_creature(5, 4);
+    creature.cpu = .{ .ax = 9, .bx = 4, .cx = 99 };
+
+    try testing.expect(run_opcode(&creature, &soup, .sub_ab) == .none);
+    try testing.expectEqual(@as(u16, 5), creature.cpu.cx);
+    try testing.expectEqual(@as(u16, 9), creature.cpu.ax);
+    try testing.expect(run_opcode(&creature, &soup, .sub_ac) == .none);
+    try testing.expectEqual(@as(u16, 4), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 5), creature.cpu.cx);
+    try testing.expectEqual(@as(u16, 4), creature.cpu.bx);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 2), creature.instructions_executed);
+}
+
+test "sub_ab wraps at 16 bits" {
+    var soup = Soup(3){};
+    var creature = test_creature(5, 3);
+    creature.cpu = .{ .ax = 2, .bx = 5 };
+
+    try testing.expect(run_opcode(&creature, &soup, .sub_ab) == .none);
+    try testing.expectEqual(@as(u16, 0xfffd), creature.cpu.cx);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
+}
+
+test "sub_ac wraps at 16 bits" {
+    var soup = Soup(3){};
+    var creature = test_creature(5, 3);
+    creature.cpu = .{ .ax = 0, .cx = 1 };
+
+    try testing.expect(run_opcode(&creature, &soup, .sub_ac) == .none);
+    try testing.expectEqual(@as(u16, 0xffff), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.cx);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
+}
+
+test "increments and decrement affect only their target registers" {
+    var soup = Soup(5){};
+    var creature = test_creature(5, 5);
+    creature.cpu = .{ .ax = 2, .bx = 3, .cx = 1 };
+
+    try testing.expect(run_opcode(&creature, &soup, .inc_a) == .none);
+    try testing.expectEqual(@as(u16, 3), creature.cpu.ax);
+    try testing.expect(run_opcode(&creature, &soup, .inc_b) == .none);
+    try testing.expectEqual(@as(u16, 4), creature.cpu.bx);
+    try testing.expect(run_opcode(&creature, &soup, .inc_c) == .none);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.cx);
+    try testing.expect(run_opcode(&creature, &soup, .dec_c) == .none);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.cx);
+    try testing.expectEqual(@as(u16, 3), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 4), creature.cpu.bx);
+    try testing.expectEqual(@as(u16, 4), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 4), creature.instructions_executed);
+}
+
+test "inc_a wraps at 16 bits" {
+    var soup = Soup(3){};
+    var creature = test_creature(5, 3);
+    creature.cpu.ax = 0xffff;
+    try testing.expect(run_opcode(&creature, &soup, .inc_a) == .none);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.ax);
+}
+
+test "inc_b wraps at 16 bits" {
+    var soup = Soup(3){};
+    var creature = test_creature(5, 3);
+    creature.cpu.bx = 0xffff;
+    try testing.expect(run_opcode(&creature, &soup, .inc_b) == .none);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.bx);
+}
+
+test "inc_c wraps at 16 bits" {
+    var soup = Soup(3){};
+    var creature = test_creature(5, 3);
+    creature.cpu.cx = 0xffff;
+    try testing.expect(run_opcode(&creature, &soup, .inc_c) == .none);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.cx);
+}
+
+test "dec_c wraps at 16 bits" {
+    var soup = Soup(3){};
+    var creature = test_creature(5, 3);
+    try testing.expect(run_opcode(&creature, &soup, .dec_c) == .none);
+    try testing.expectEqual(@as(u16, 0xffff), creature.cpu.cx);
+}
+
+test "register moves copy values without changing their sources" {
+    var soup = Soup(3){};
+    var creature = test_creature(5, 3);
+    creature.cpu = .{ .ax = 7, .bx = 22, .cx = 13, .dx = 44 };
+
+    try testing.expect(run_opcode(&creature, &soup, .mov_cd) == .none);
+    try testing.expect(run_opcode(&creature, &soup, .mov_ab) == .none);
+    try testing.expectEqual(@as(u16, 7), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 7), creature.cpu.bx);
+    try testing.expectEqual(@as(u16, 13), creature.cpu.cx);
+    try testing.expectEqual(@as(u16, 13), creature.cpu.dx);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.ip);
+}
+
+test "all push and pop opcodes preserve stack order" {
+    var soup = Soup(9){};
+    var creature = test_creature(4, 9);
+    creature.cpu = .{ .ax = 11, .bx = 22, .cx = 33, .dx = 44 };
+
+    inline for (.{ Instruction.push_ax, Instruction.push_bx, Instruction.push_cx, Instruction.push_dx }) |opcode| {
+        try testing.expect(run_opcode(&creature, &soup, opcode) == .none);
+    }
+    try testing.expectEqual(@as(u16, 4), creature.cpu.sp);
+    creature.cpu.ax = 0;
+    creature.cpu.bx = 0;
+    creature.cpu.cx = 0;
+    creature.cpu.dx = 0;
+    inline for (.{ Instruction.pop_dx, Instruction.pop_cx, Instruction.pop_bx, Instruction.pop_ax }) |opcode| {
+        try testing.expect(run_opcode(&creature, &soup, opcode) == .none);
+    }
+    try testing.expectEqual(@as(u16, 11), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 22), creature.cpu.bx);
+    try testing.expectEqual(@as(u16, 33), creature.cpu.cx);
+    try testing.expectEqual(@as(u16, 44), creature.cpu.dx);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.sp);
+    try testing.expectEqual(@as(u16, 8), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 8), creature.instructions_executed);
+}
+
+test "failed stack instructions advance and preserve stack and destination" {
+    var soup = Soup(4){};
+    var creature = test_creature(2, 4);
+    creature.cpu = .{ .ax = 42, .sp = 2 };
+    creature.cpu.stack[0] = 11;
+    creature.cpu.stack[1] = 22;
+
+    try testing.expect(run_opcode(&creature, &soup, .push_ax) == .error_condition);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.sp);
+    try testing.expectEqual(@as(u16, 11), creature.cpu.stack[0]);
+    try testing.expectEqual(@as(u16, 22), creature.cpu.stack[1]);
+    try testing.expectEqual(@as(u8, 1), creature.cpu.fl);
+
+    creature.cpu.sp = 0;
+    try testing.expect(run_opcode(&creature, &soup, .pop_ax) == .error_condition);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.sp);
+    try testing.expectEqual(@as(u16, 42), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 11), creature.cpu.stack[0]);
+    try testing.expectEqual(@as(u16, 22), creature.cpu.stack[1]);
+    try testing.expectEqual(@as(u8, 1), creature.cpu.fl);
+    try testing.expectEqual(@as(u16, 2), creature.instructions_executed);
+}
+
+test "if_cz executes the next opcode only when cx is zero" {
+    var soup = Soup(5){};
+    soup.memory[1] = .inc_a;
+    var creature = test_creature(5, 5);
+
+    try testing.expect(run_opcode(&creature, &soup, .if_cz) == .none);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
+    try testing.expect(creature.cpu.step(&soup, &creature) == .none);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 2), creature.instructions_executed);
+
+    creature.cpu = .{ .cx = 1 };
+    creature.instructions_executed = 0;
+    try testing.expect(run_opcode(&creature, &soup, .if_cz) == .none);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
+}
+
+test "if_cz skips a complete template without executing any skipped cell" {
+    inline for (.{ Instruction.jmp, Instruction.jmpb, Instruction.call, Instruction.adr, Instruction.adrb, Instruction.adrf }) |skipped_opcode| {
+        var soup = Soup(7){};
+        soup.memory = .{ .inc_a, skipped_opcode, .nop_0, .nop_1, .inc_a, .inc_a, .inc_a };
+        var creature = test_creature(5, 7);
+        creature.cpu = .{ .ax = 23, .cx = 1, .fl = 1 };
+
+        try testing.expect(run_opcode(&creature, &soup, .if_cz) == .none);
+        try testing.expectEqual(@as(u16, 4), creature.cpu.ip);
+        try testing.expectEqual(@as(u16, 23), creature.cpu.ax);
+        try testing.expectEqual(@as(u16, 1), creature.cpu.cx);
+        try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
+        try testing.expectEqual(@as(u16, 0), creature.cpu.sp);
+        try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
+    }
+
+    var soup = Soup(7){};
+    soup.memory = .{ .nop_0, .nop_1, .inc_a, .inc_a, .inc_a, .inc_a, .jmp };
+    var creature = test_creature(5, 7);
+    creature.cpu = .{ .ip = 5, .cx = 1 };
+    try testing.expect(run_opcode(&creature, &soup, .if_cz) == .none);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
+}
+
 test "empty jumps use normalized bx and clear the error flag" {
     var soup = Soup(7){};
     soup.memory[0] = Instruction.inc_a;
-    soup.memory[6] = Instruction.jmp;
 
     inline for (.{ 0, 1, 100 }) |budget| {
         inline for (.{ false, true }) |backward| {
-            var cpu = CPU(5, budget){ .ip = 6, .bx = 17, .fl = 1 };
-            const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+            var creature = test_creature(5, budget);
+            creature.cpu = .{ .ip = 6, .bx = 17, .fl = 1 };
+            const result = run_opcode(&creature, &soup, if (backward) .jmpb else .jmp);
 
             try testing.expect(result == .none);
-            try testing.expectEqual(@as(u16, 3), cpu.ip);
-            try testing.expectEqual(@as(u8, 0), cpu.fl);
-            try testing.expectEqual(@as(u16, 17), cpu.bx);
+            try testing.expectEqual(@as(u16, 3), creature.cpu.ip);
+            try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
+            try testing.expectEqual(@as(u16, 17), creature.cpu.bx);
+            try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
         }
     }
 }
@@ -517,13 +753,15 @@ test "failed jumps skip a nonempty operand and set the error flag" {
     soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.nop_0, Instruction.inc_a, Instruction.inc_b, Instruction.zero, Instruction.ret };
 
     inline for (.{ false, true }) |backward| {
-        var cpu = CPU(5, 100){ .bx = 5 };
-        const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+        var creature = test_creature(5, 100);
+        creature.cpu.bx = 5;
+        const result = run_opcode(&creature, &soup, if (backward) .jmpb else .jmp);
 
         try testing.expect(result == .error_condition);
-        try testing.expectEqual(@as(u16, 3), cpu.ip);
-        try testing.expectEqual(@as(u8, 1), cpu.fl);
-        try testing.expectEqual(@as(u16, 5), cpu.bx);
+        try testing.expectEqual(@as(u16, 3), creature.cpu.ip);
+        try testing.expectEqual(@as(u8, 1), creature.cpu.fl);
+        try testing.expectEqual(@as(u16, 5), creature.cpu.bx);
+        try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
     }
 }
 
@@ -536,13 +774,14 @@ test "jump direction chooses the appropriate successful match" {
     soup.memory[1] = Instruction.nop_1;
 
     inline for (.{ false, true }) |backward| {
-        var cpu = CPU(5, 3){ .ip = 4, .bx = 42, .fl = 1 };
-        const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+        var creature = test_creature(5, 3);
+        creature.cpu = .{ .ip = 4, .bx = 42, .fl = 1 };
+        const result = run_opcode(&creature, &soup, if (backward) .jmpb else .jmp);
 
         try testing.expect(result == .none);
-        try testing.expectEqual(@as(u16, if (backward) 2 else 8), cpu.ip);
-        try testing.expectEqual(@as(u8, 0), cpu.fl);
-        try testing.expectEqual(@as(u16, 42), cpu.bx);
+        try testing.expectEqual(@as(u16, if (backward) 2 else 8), creature.cpu.ip);
+        try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
+        try testing.expectEqual(@as(u16, 42), creature.cpu.bx);
     }
 }
 
@@ -555,13 +794,41 @@ test "successful jumps handle a wrapped forward target and equal round matches" 
     soup.memory[5] = Instruction.nop_1;
 
     inline for (.{ false, true }) |backward| {
-        var cpu = CPU(5, 2){ .ip = 7, .bx = 42, .fl = 1 };
-        const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+        var creature = test_creature(5, 2);
+        creature.cpu = .{ .ip = 7, .bx = 42, .fl = 1 };
+        const result = run_opcode(&creature, &soup, if (backward) .jmpb else .jmp);
 
         try testing.expect(result == .none);
-        try testing.expectEqual(@as(u16, if (backward) 6 else 2), cpu.ip);
-        try testing.expectEqual(@as(u8, 0), cpu.fl);
-        try testing.expectEqual(@as(u16, 42), cpu.bx);
+        try testing.expectEqual(@as(u16, if (backward) 6 else 2), creature.cpu.ip);
+        try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
+        try testing.expectEqual(@as(u16, 42), creature.cpu.bx);
+    }
+}
+
+test "template search respects the candidate round limit" {
+    var soup = Soup(9){};
+    soup.memory = .{Instruction.inc_a} ** 9;
+    soup.memory[5] = .nop_0;
+    soup.memory[7] = .nop_1;
+
+    inline for (.{ Instruction.jmp, Instruction.adrf }) |opcode| {
+        var too_short = test_creature(5, 1);
+        too_short.cpu = .{ .ip = 4, .ax = 55, .cx = 99 };
+        try testing.expect(run_opcode(&too_short, &soup, opcode) == .error_condition);
+        try testing.expectEqual(@as(u16, 6), too_short.cpu.ip);
+        try testing.expectEqual(@as(u16, 55), too_short.cpu.ax);
+        try testing.expectEqual(@as(u16, 99), too_short.cpu.cx);
+        try testing.expectEqual(@as(u8, 1), too_short.cpu.fl);
+
+        var enough = test_creature(5, 2);
+        enough.cpu.ip = 4;
+        const result = run_opcode(&enough, &soup, opcode);
+        try testing.expect(result == if (opcode == .jmp) ExecResult.none else ExecResult.hard_instruction_success);
+        try testing.expectEqual(@as(u16, if (opcode == .jmp) 8 else 6), enough.cpu.ip);
+        if (opcode == .adrf) {
+            try testing.expectEqual(@as(u16, 8), enough.cpu.ax);
+            try testing.expectEqual(@as(u16, 1), enough.cpu.cx);
+        }
     }
 }
 
@@ -571,13 +838,14 @@ test "failed jumps skip the full wrapped operand even with short budgets" {
 
     inline for (.{ 0, 1, 100 }) |budget| {
         inline for (.{ false, true }) |backward| {
-            var cpu = CPU(5, budget){ .ip = 5, .bx = 3 };
-            const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+            var creature = test_creature(5, budget);
+            creature.cpu = .{ .ip = 5, .bx = 3 };
+            const result = run_opcode(&creature, &soup, if (backward) .jmpb else .jmp);
 
             try testing.expect(result == .error_condition);
-            try testing.expectEqual(@as(u16, 1), cpu.ip);
-            try testing.expectEqual(@as(u8, 1), cpu.fl);
-            try testing.expectEqual(@as(u16, 3), cpu.bx);
+            try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
+            try testing.expectEqual(@as(u8, 1), creature.cpu.fl);
+            try testing.expectEqual(@as(u16, 3), creature.cpu.bx);
         }
     }
 }
@@ -589,13 +857,256 @@ test "invalid all NOP jump input reports an error after a bounded traversal" {
 
     inline for (.{ 0, 100 }) |budget| {
         inline for (.{ false, true }) |backward| {
-            var cpu = CPU(5, budget){ .ip = 5, .bx = 3 };
-            const result = if (backward) cpu.jmpb(&soup) else cpu.jmp(&soup);
+            var creature = test_creature(5, budget);
+            creature.cpu = .{ .ip = 5, .bx = 3 };
+            const result = if (backward) creature.cpu.jmpb(&soup) else creature.cpu.jmp(&soup);
 
             try testing.expect(result == .error_condition);
-            try testing.expectEqual(@as(u16, 6), cpu.ip);
-            try testing.expectEqual(@as(u8, 1), cpu.fl);
-            try testing.expectEqual(@as(u16, 3), cpu.bx);
+            try testing.expectEqual(@as(u16, 6), creature.cpu.ip);
+            try testing.expectEqual(@as(u8, 1), creature.cpu.fl);
+            try testing.expectEqual(@as(u16, 3), creature.cpu.bx);
         }
     }
+}
+
+test "call finds a complementary template and ret uses its return address" {
+    var soup = Soup(10){};
+    soup.memory = .{Instruction.inc_a} ** 10;
+    soup.memory[4] = .nop_0;
+    soup.memory[7] = .nop_1;
+    var creature = test_creature(5, 3);
+    creature.cpu.ip = 3;
+
+    try testing.expect(run_opcode(&creature, &soup, .call) == .none);
+    try testing.expectEqual(@as(u16, 8), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.sp);
+    try testing.expectEqual(@as(u16, 5), creature.cpu.stack[0]);
+    try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
+
+    try testing.expect(run_opcode(&creature, &soup, .ret) == .none);
+    try testing.expectEqual(@as(u16, 5), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.sp);
+    try testing.expectEqual(@as(u16, 2), creature.instructions_executed);
+}
+
+test "empty call pushes the next address and ret normalizes a popped address" {
+    var soup = Soup(10){};
+    soup.memory = .{Instruction.inc_a} ** 10;
+    var creature = test_creature(5, 0);
+    creature.cpu.ip = 3;
+
+    try testing.expect(run_opcode(&creature, &soup, .call) == .none);
+    try testing.expectEqual(@as(u16, 4), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.sp);
+    try testing.expectEqual(@as(u16, 4), creature.cpu.stack[0]);
+    try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
+
+    creature.cpu.sp = 0;
+    creature.cpu.ip = 1;
+    try creature.cpu.push(27);
+    try testing.expect(run_opcode(&creature, &soup, .ret) == .none);
+    try testing.expectEqual(@as(u16, 7), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.sp);
+}
+
+test "failed call leaves the stack intact and continues after its operand" {
+    var soup = Soup(7){};
+    soup.memory = .{Instruction.inc_a} ** 7;
+    soup.memory[1] = .nop_0;
+    var creature = test_creature(5, 7);
+    try creature.cpu.push(77);
+
+    try testing.expect(run_opcode(&creature, &soup, .call) == .error_condition);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.sp);
+    try testing.expectEqual(@as(u16, 77), creature.cpu.stack[0]);
+    try testing.expectEqual(@as(u8, 1), creature.cpu.fl);
+    try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
+}
+
+test "full stack prevents call from jumping even when a template matches" {
+    var soup = Soup(10){};
+    soup.memory = .{Instruction.inc_a} ** 10;
+    soup.memory[4] = .nop_0;
+    soup.memory[7] = .nop_1;
+    var creature = test_creature(1, 3);
+    creature.cpu.ip = 3;
+    try creature.cpu.push(77);
+
+    try testing.expect(run_opcode(&creature, &soup, .call) == .error_condition);
+    try testing.expectEqual(@as(u16, 5), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.sp);
+    try testing.expectEqual(@as(u16, 77), creature.cpu.stack[0]);
+    try testing.expectEqual(@as(u8, 1), creature.cpu.fl);
+}
+
+test "ret on an empty stack reports an error and advances once" {
+    var soup = Soup(3){};
+    var creature = test_creature(5, 3);
+    creature.cpu.ip = 2;
+
+    try testing.expect(run_opcode(&creature, &soup, .ret) == .error_condition);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 0), creature.cpu.sp);
+    try testing.expectEqual(@as(u8, 1), creature.cpu.fl);
+    try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
+}
+
+test "adr variants select their direction and store match end and operand length" {
+    var soup = Soup(9){};
+    soup.memory = .{Instruction.inc_a} ** 9;
+    soup.memory[5] = .nop_0;
+    soup.memory[7] = .nop_1;
+    soup.memory[1] = .nop_1;
+
+    inline for (.{ Instruction.adr, Instruction.adrb, Instruction.adrf }) |opcode| {
+        var creature = test_creature(5, 3);
+        creature.cpu = .{ .ip = 4, .ax = 55, .bx = 12, .cx = 99, .fl = 1 };
+        const result = run_opcode(&creature, &soup, opcode);
+
+        try testing.expect(result == .hard_instruction_success);
+        try testing.expectEqual(@as(u16, if (opcode == .adrb) 2 else 8), creature.cpu.ax);
+        try testing.expectEqual(@as(u16, 1), creature.cpu.cx);
+        try testing.expectEqual(@as(u16, 6), creature.cpu.ip);
+        try testing.expectEqual(@as(u16, 12), creature.cpu.bx);
+        try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
+        try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
+    }
+}
+
+test "adr variants with no operand leave result registers unchanged" {
+    var soup = Soup(7){};
+    soup.memory = .{Instruction.inc_a} ** 7;
+
+    inline for (.{ Instruction.adr, Instruction.adrb, Instruction.adrf }) |opcode| {
+        var creature = test_creature(5, 0);
+        creature.cpu = .{ .ip = 3, .ax = 55, .cx = 99, .fl = 1 };
+        try testing.expect(run_opcode(&creature, &soup, opcode) == .none);
+        try testing.expectEqual(@as(u16, 4), creature.cpu.ip);
+        try testing.expectEqual(@as(u16, 55), creature.cpu.ax);
+        try testing.expectEqual(@as(u16, 99), creature.cpu.cx);
+        try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
+    }
+}
+
+test "failed adr search skips the operand without changing result registers" {
+    var soup = Soup(7){};
+    soup.memory = .{Instruction.inc_a} ** 7;
+    soup.memory[1] = .nop_0;
+    soup.memory[2] = .nop_0;
+
+    inline for (.{ 0, 7 }) |budget| {
+        inline for (.{ Instruction.adr, Instruction.adrb, Instruction.adrf }) |opcode| {
+            var creature = test_creature(5, budget);
+            creature.cpu = .{ .ax = 55, .cx = 99 };
+            try testing.expect(run_opcode(&creature, &soup, opcode) == .error_condition);
+            try testing.expectEqual(@as(u16, 3), creature.cpu.ip);
+            try testing.expectEqual(@as(u16, 55), creature.cpu.ax);
+            try testing.expectEqual(@as(u16, 99), creature.cpu.cx);
+            try testing.expectEqual(@as(u8, 1), creature.cpu.fl);
+            try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
+        }
+    }
+}
+
+test "adrb recognizes a wrapped operand and stores the address after its match" {
+    var soup = Soup(7){};
+    soup.memory = .{Instruction.inc_a} ** 7;
+    soup.memory[6] = .nop_0;
+    soup.memory[0] = .nop_1;
+    soup.memory[3] = .nop_1;
+    soup.memory[4] = .nop_0;
+    var creature = test_creature(5, 1);
+    creature.cpu.ip = 5;
+
+    try testing.expect(run_opcode(&creature, &soup, .adrb) == .hard_instruction_success);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 5), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.cx);
+    try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
+}
+
+test "mov_iab copies a normalized source into owned memory exactly once" {
+    var soup = Soup(7){};
+    soup.memory[2] = .inc_c;
+    soup.memory[5] = .zero;
+    soup.owner[0] = 1;
+    soup.owner[5] = 1;
+    var creature = test_creature(5, 7);
+    creature.daughter_alloc = .{ .start = 5, .len = 1 };
+    creature.cpu = .{ .ax = 12, .bx = 9, .fl = 1 };
+
+    try testing.expect(run_opcode(&creature, &soup, .mov_iab) == .none);
+    try testing.expectEqual(Instruction.inc_c, soup.memory[5]);
+    try testing.expectEqual(@as(u16, 12), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 9), creature.cpu.bx);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 1), creature.instructions_copied);
+    try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
+    try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
+}
+
+test "mov_iab rejects an unowned destination without counting a copy" {
+    var soup = Soup(7){};
+    soup.memory[2] = .inc_c;
+    soup.memory[5] = .zero;
+    soup.owner[0] = 1;
+    soup.owner[5] = 2;
+    var creature = test_creature(5, 7);
+    creature.cpu = .{ .ax = 12, .bx = 9 };
+
+    try testing.expect(run_opcode(&creature, &soup, .mov_iab) == .error_condition);
+    try testing.expectEqual(Instruction.zero, soup.memory[5]);
+    try testing.expectEqual(@as(u16, 12), creature.cpu.ax);
+    try testing.expectEqual(@as(u16, 9), creature.cpu.bx);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 0), creature.instructions_copied);
+    try testing.expectEqual(@as(u16, 1), creature.instructions_executed);
+    try testing.expectEqual(@as(u8, 1), creature.cpu.fl);
+}
+
+test "mal requests the exact cx size and advances without allocating" {
+    var soup = Soup(3){};
+    var creature = test_creature(5, 3);
+    creature.cpu = .{ .cx = 7, .fl = 1 };
+
+    const first = run_opcode(&creature, &soup, .mal);
+    try testing.expect(first == .mal_request);
+    try testing.expectEqual(@as(u16, 7), first.mal_request);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
+    try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
+    try testing.expectEqual(soup.len, soup.count_free_memory());
+
+    creature.cpu.cx = 0;
+    const second = run_opcode(&creature, &soup, .mal);
+    try testing.expect(second == .mal_request);
+    try testing.expectEqual(@as(u16, 0), second.mal_request);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.ip);
+    try testing.expectEqual(@as(u16, 2), creature.instructions_executed);
+}
+
+test "divide reports the daughter allocation or an error when absent" {
+    var soup = Soup(4){};
+    soup.owner[0] = 1;
+    soup.owner[2] = 1;
+    soup.owner[3] = 1;
+    var creature = test_creature(5, 4);
+    creature.daughter_alloc = .{ .start = 2, .len = 2 };
+    creature.cpu.fl = 1;
+
+    const success = run_opcode(&creature, &soup, .divide);
+    try testing.expect(success == .divide);
+    try testing.expectEqual(@as(u16, 2), success.divide.start);
+    try testing.expectEqual(@as(u16, 2), success.divide.len);
+    try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
+    try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
+    try testing.expect(creature.daughter_alloc != null);
+    try testing.expectEqual(@as(?CreatureId, 1), soup.owner[2]);
+    try testing.expectEqual(@as(?CreatureId, 1), soup.owner[3]);
+
+    creature.daughter_alloc = null;
+    try testing.expect(run_opcode(&creature, &soup, .divide) == .error_condition);
+    try testing.expectEqual(@as(u16, 2), creature.cpu.ip);
+    try testing.expectEqual(@as(u8, 1), creature.cpu.fl);
+    try testing.expectEqual(@as(u16, 2), creature.instructions_executed);
 }

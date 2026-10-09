@@ -192,11 +192,11 @@ test "search forward" {
     // Simplest case, we find a pattern.
     var soup_simple = Soup(7){};
     soup_simple.memory = .{
-        null,
+        Instruction.inc_a,
         Instruction.nop_0,
         Instruction.nop_1,
-        null,
-        null,
+        Instruction.inc_a,
+        Instruction.inc_a,
         Instruction.nop_1,
         Instruction.nop_0,
     };
@@ -209,11 +209,11 @@ test "search forward" {
 
     // Pattern not found.
     soup_simple.memory = .{
-        null,
+        Instruction.inc_a,
         Instruction.nop_0,
         Instruction.nop_1,
-        null,
-        null,
+        Instruction.inc_a,
+        Instruction.inc_a,
         Instruction.adrb,
         Instruction.nop_0,
     };
@@ -226,11 +226,11 @@ test "search forward wrap around" {
     const soup_size = 7;
     var soup_simple = Soup(soup_size){};
     soup_simple.memory = .{
-        null,
+        Instruction.inc_a,
         Instruction.nop_0,
         Instruction.nop_1,
-        null,
-        null,
+        Instruction.inc_a,
+        Instruction.inc_a,
         Instruction.nop_1,
         Instruction.nop_0,
     };
@@ -242,11 +242,11 @@ test "search forward wrap around" {
 
     // Pattern not found.
     soup_simple.memory = .{
-        null,
+        Instruction.inc_a,
         Instruction.mov_ab,
         Instruction.nop_1,
-        null,
-        null,
+        Instruction.inc_a,
+        Instruction.inc_a,
         Instruction.nop_1,
         Instruction.nop_0,
     };
@@ -262,17 +262,17 @@ test "search backward" {
         Instruction.nop_1,
         Instruction.nop_1,
         Instruction.nop_1,
-        null,
-        null,
-        null,
-        null,
-        null,
+        Instruction.inc_a,
+        Instruction.inc_a,
+        Instruction.inc_a,
+        Instruction.inc_a,
+        Instruction.inc_a,
         Instruction.adrb,
         Instruction.nop_0,
         Instruction.nop_0,
         Instruction.nop_0,
         Instruction.nop_0,
-        null,
+        Instruction.inc_a,
     };
 
     try testing.expectEqual(4, search_backward(&soup_simple, 10, 100));
@@ -283,21 +283,21 @@ test "search backward" {
 
     // Pattern not found.
     soup_simple.memory = .{
-        null,
+        Instruction.inc_a,
         Instruction.nop_1,
         Instruction.nop_1,
         Instruction.nop_1,
-        null,
-        null,
-        null,
-        null,
-        null,
+        Instruction.inc_a,
+        Instruction.inc_a,
+        Instruction.inc_a,
+        Instruction.inc_a,
+        Instruction.inc_a,
         Instruction.adrb,
         Instruction.nop_0,
         Instruction.nop_0,
         Instruction.nop_0,
         Instruction.nop_0,
-        null,
+        Instruction.inc_a,
     };
 
     try testing.expectEqual(null, search_backward(&soup_simple, 10, 100));
@@ -307,11 +307,11 @@ test "search backward wrap around" {
     var soup_simple = Soup(7){};
     soup_simple.memory = .{
         Instruction.nop_1,
-        null,
+        Instruction.inc_a,
         Instruction.adrb,
         Instruction.nop_0,
         Instruction.nop_0,
-        null,
+        Instruction.inc_a,
         Instruction.nop_1,
     };
 
@@ -321,19 +321,19 @@ test "search backward wrap around" {
 test "search bidirectional" {
     var soup_simple = Soup(13){};
     soup_simple.memory = .{
-        null,
+        Instruction.inc_a,
         Instruction.nop_0,
         Instruction.nop_1,
-        null,
-        null,
+        Instruction.inc_a,
+        Instruction.inc_a,
         Instruction.nop_1,
         Instruction.nop_0,
-        null,
-        null,
+        Instruction.inc_a,
+        Instruction.inc_a,
         Instruction.nop_1,
         Instruction.nop_0,
-        null,
-        null,
+        Instruction.inc_a,
+        Instruction.inc_a,
     };
 
     try testing.expectEqual(3, search_bidirectional(soup_simple, 5, 100));
@@ -342,7 +342,7 @@ test "search bidirectional" {
 
 test "pattern length distinguishes empty valid and invalid operands" {
     var soup = Soup(5){};
-    soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.nop_1, Instruction.inc_a, null };
+    soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.nop_1, Instruction.inc_a, Instruction.inc_a };
 
     try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, 3));
     try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, 4));
@@ -353,7 +353,7 @@ test "pattern length distinguishes empty valid and invalid operands" {
 
 test "searches reject empty operands" {
     var soup = Soup(7){};
-    soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.nop_1, Instruction.inc_a, Instruction.nop_1, Instruction.nop_0, null };
+    soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.nop_1, Instruction.inc_a, Instruction.nop_1, Instruction.nop_0, Instruction.inc_a };
 
     for ([_]u16{ 0, 3, 6 }) |start| {
         try testing.expectEqual(@as(?u16, 0), pattern_length_at(&soup, start));
@@ -365,7 +365,7 @@ test "searches reject empty operands" {
 
 test "searches with zero budget return no match" {
     var soup = Soup(5){};
-    soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.inc_a, Instruction.nop_1, null };
+    soup.memory = .{ Instruction.jmp, Instruction.nop_0, Instruction.inc_a, Instruction.nop_1, Instruction.inc_a };
 
     try testing.expectEqual(@as(?u16, null), search_forward(&soup, 1, 0));
     try testing.expectEqual(@as(?u16, null), search_backward(&soup, 1, 0));
@@ -444,10 +444,10 @@ test "candidate overlap includes the instruction and wrapped operand" {
 
 const CountingSoup = struct {
     comptime len: u16 = 7,
-    memory: [7]?Instruction = .{Instruction.inc_a} ** 7,
+    memory: [7]Instruction = .{Instruction.inc_a} ** 7,
     reads: usize = 0,
 
-    pub fn read(self: *@This(), address: u16) ?Instruction {
+    pub fn read(self: *@This(), address: u16) Instruction {
         self.reads += 1;
         return self.memory[address];
     }

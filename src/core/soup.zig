@@ -27,11 +27,11 @@ pub fn Soup(comptime size: u16) type {
     return struct {
         const Self = @This();
 
-        memory: [size]?Instruction = .{null} ** size,
+        memory: [size]Instruction = .{.nop_0} ** size,
         owner: [size]?CreatureId = .{null} ** size,
         comptime len: u16 = size,
 
-        pub fn read(self: *const Self, address: u16) ?Instruction {
+        pub fn read(self: *const Self, address: u16) Instruction {
             return self.memory[address];
         }
 
@@ -122,14 +122,14 @@ test "test constructor" {
     try testing.expectEqual(1234, soup.len);
     try testing.expectEqual(1234, soup.memory.len);
     try testing.expectEqual(1234, soup.owner.len);
-    try testing.expectEqual(null, soup.memory[0]);
+    try testing.expectEqual(Instruction.nop_0, soup.read(0));
     try testing.expectEqual(null, soup.owner[0]);
 }
 
 test "allocation, free round trip" {
     var soup = Soup(5){};
 
-    soup.memory[0] = Instruction.nop_0;
+    soup.memory[0] = Instruction.inc_a;
     soup.owner[0] = 0x123;
 
     const allocation = try soup.allocate(2, 0x777);
@@ -137,12 +137,12 @@ test "allocation, free round trip" {
     try testing.expectEqual(1, allocation.start);
     try testing.expectEqual(2, allocation.len);
 
-    try testing.expectEqualSlices(?Instruction, &[_]?Instruction{ Instruction.nop_0, null, null, null, null }, &soup.memory);
+    try testing.expectEqualSlices(Instruction, &[_]Instruction{ .inc_a, .nop_0, .nop_0, .nop_0, .nop_0 }, &soup.memory);
     try testing.expectEqualSlices(?CreatureId, &[_]?CreatureId{ 0x123, 0x777, 0x777, null, null }, &soup.owner);
 
     try soup.free(allocation);
 
-    try testing.expectEqualSlices(?Instruction, &[_]?Instruction{ Instruction.nop_0, null, null, null, null }, &soup.memory);
+    try testing.expectEqualSlices(Instruction, &[_]Instruction{ .inc_a, .nop_0, .nop_0, .nop_0, .nop_0 }, &soup.memory);
     try testing.expectEqualSlices(?CreatureId, &[_]?CreatureId{ 0x123, null, null, null, null }, &soup.owner);
 }
 
@@ -170,5 +170,5 @@ test "inoculate" {
     try testing.expectEqual(1, allocation.start);
     try testing.expectEqual(3, allocation.len);
 
-    try testing.expectEqualSlices(?Instruction, &[_]?Instruction{ null, Instruction.nop_0, Instruction.divide, Instruction.jmp, null }, &soup.memory);
+    try testing.expectEqualSlices(Instruction, &[_]Instruction{ .nop_0, .nop_0, .divide, .jmp, .nop_0 }, &soup.memory);
 }
