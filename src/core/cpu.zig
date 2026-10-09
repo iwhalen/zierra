@@ -5,7 +5,6 @@ const Creature = creature_module.Creature;
 const CreatureId = creature_module.CreatureId;
 const instruction_module = @import("instruction.zig");
 const Instruction = instruction_module.Instruction;
-const decode = instruction_module.decode;
 const soup_module = @import("soup.zig");
 const Soup = soup_module.Soup;
 const Allocation = soup_module.Allocation;

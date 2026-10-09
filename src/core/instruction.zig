@@ -44,26 +44,8 @@ pub const Instruction = enum(u8) {
     divide, // Cell division
 };
 
-// Masks first three bits before conversion to enum.
-pub fn decode(value: u8) Instruction {
-    const mask = 0x1f;
-    return @enumFromInt(mask & value);
-}
-
-pub fn encode(instruction: Instruction) u8 {
-    return @intFromEnum(instruction);
-}
-
-pub fn is_nop(value: anytype) bool {
-    const T = @TypeOf(value);
-
-    if (T == Instruction) {
-        return (value == Instruction.nop_0) or (value == Instruction.nop_1);
-    } else if (T == u8 or comptime @typeInfo(T) == .int) {
-        return (decode(value) == Instruction.nop_0) or (decode(value) == Instruction.nop_1);
-    } else {
-        @compileError("Invalid type given to `is_nop`.");
-    }
+pub fn is_nop(value: Instruction) bool {
+    return (value == Instruction.nop_0) or (value == Instruction.nop_1);
 }
 
 pub fn complement(value: Instruction) Instruction {
@@ -74,46 +56,7 @@ pub fn complement(value: Instruction) Instruction {
     };
 }
 
-test "Sanity check decoding" {
-    const nop_0_as_int = 0x00;
-    const nop_0_decoded = decode(nop_0_as_int);
-    try testing.expectEqual(Instruction.nop_0, nop_0_decoded);
-
-    const divide_as_int = 0x1f;
-    const divide_decoded = decode(divide_as_int);
-    try testing.expectEqual(Instruction.divide, divide_decoded);
-
-    const inc_b_as_int = 0x09;
-    const inc_b_result = decode(inc_b_as_int);
-    try testing.expectEqual(Instruction.inc_b, inc_b_result);
-}
-
-test "Decoding masks leading 3 bits" {
-    const nop_0_with_leading = 0x20;
-    const nop_0_decoded = decode(nop_0_with_leading);
-    try testing.expectEqual(Instruction.nop_0, nop_0_decoded);
-
-    const divide_with_leading = 0xff;
-    const divide_decoded = decode(divide_with_leading);
-    try testing.expectEqual(Instruction.divide, divide_decoded);
-}
-
-test "Sanity check encoding" {
-    const nop_0_encoded = encode(Instruction.nop_0);
-    try testing.expectEqual(0x00, nop_0_encoded);
-
-    const divide_encoded = encode(Instruction.divide);
-    try testing.expectEqual(0x1f, divide_encoded);
-
-    const inc_b_encoded = encode(Instruction.inc_b);
-    try testing.expectEqual(0x09, inc_b_encoded);
-}
-
 test "is nop" {
-    try testing.expect(is_nop(@as(u8, 0x00)));
-    try testing.expect(is_nop(@as(u8, 0x01)));
-    try testing.expect(!is_nop(@as(u8, 0x1c)));
-
     try testing.expect(is_nop(Instruction.nop_0));
     try testing.expect(is_nop(Instruction.nop_1));
     try testing.expect(!is_nop(Instruction.adr));
