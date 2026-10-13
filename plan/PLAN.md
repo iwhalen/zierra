@@ -1,6 +1,6 @@
 # Zierra: High-Level Implementation Plan
 
-This project teaches Zig 0.16.0 by building a Tierra simulation in small, testable steps.
+This project teaches Zig 0.17.0 by building a Tierra simulation in small, testable steps.
 The plan describes goals, contracts, and exercises; implementation remains the learner's work.
 Work through one checkpoint at a time, predict its behavior, and write a small test before
 connecting it to the next module.
@@ -24,9 +24,9 @@ connecting it to the next module.
 - [Zig language reference](../reference/langref.html.in) and [standard library](../reference/std/):
   documentation only; never modify this directory.
 - Confirm the compiler with `zig version`. If an API differs from the local reference,
-  inspect the standard library installed with Zig 0.16.0, located through `zig env`.
+  inspect the standard library installed with Zig 0.17.0, located through `zig env`.
 - Ziglings exercises below are concept practice. This checkout includes examples written
-  for older Zig versions; adapt API usage to 0.16.0. In particular, the old async exercises
+  for older Zig versions; adapt API usage to 0.17.0. In particular, the old async exercises
   are not a prerequisite for persistence or display.
 
 ### Current Foundations and Remaining Alignment
@@ -269,9 +269,9 @@ Goal: establish configuration, instruction representation, soup storage, and CPU
 #### Configuration (`src/config.zon`, `src/core/config.zig`)
 
 - [x] A project-wide `src/config.zon` exists.
-- [ ] Add a typed config and compile-time validation.
-- [ ] Make each concrete module receive only the configuration it needs.
-- [ ] Verify importing the config and rebuilding selects the intended concrete types.
+- [x] Add a typed config and compile-time validation.
+- [x] Make each concrete module receive only the configuration it needs.
+- [x] Verify importing the config and rebuilding selects the intended concrete types.
 
 Current production values, to keep distinct from experimental/test configurations:
 
@@ -673,7 +673,7 @@ ranges, unique identities, owners, queue membership, stack pointers, and config
 compatibility before exposing the loaded instance. Free partially constructed state
 on any parse/allocation/validation failure.
 
-Use Zig 0.16.0's `std.json.Stringify` and `std.json.parseFromSlice`, checking actual
+Use Zig 0.17.0's `std.json.Stringify` and `std.json.parseFromSlice`, checking actual
 signatures in the installed library. Own or copy parsed data before releasing its
 parse arena. Serialize only initialized stack entries; `undefined` storage is not
 checkpoint data.
@@ -702,10 +702,10 @@ Goal: add optional notcurses views while preserving headless simulation behavior
 - Read `display_enabled` at build time. Only enabled artifacts import the C wrapper
   and link notcurses/libc. A headless build and normal core tests must work without
   the notcurses development package.
-- With Zig 0.16.0, configure system-library linking on the relevant
+- With Zig 0.17.0, configure system-library linking on the relevant
   `std.Build.Module` and its `link_libc` setting; check its current signatures.
 - Use `@cImport` and a namespaced `pub const c` or explicit public aliases.
-  `pub usingnamespace` is unavailable in Zig 0.16.0.
+  `pub usingnamespace` is unavailable in Zig 0.17.0.
 - Add thin C error/default wrappers only as actual call sites require them.
 - Add `zig build test-display` for display-specific checks when this phase begins.
   This command does not exist yet.

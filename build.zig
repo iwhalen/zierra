@@ -59,8 +59,6 @@ pub fn build(b: *std.Build) void {
     // don't need and to put everything under a single module.
     const exe = b.addExecutable(.{
         .name = "zierra",
-        .use_llvm = true,
-        .use_lld = true,
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
@@ -113,17 +111,13 @@ pub fn build(b: *std.Build) void {
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
     const mod_tests = b.addTest(.{
         .root_module = mod,
-        .use_lld = true,
-        .use_llvm = true,
     });
 
     // A run step that will run the test executable.
@@ -134,8 +128,6 @@ pub fn build(b: *std.Build) void {
     // hence why we have to create two separate ones.
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
-        .use_lld = true,
-        .use_llvm = true,
     });
 
     // A run step that will run the second test executable.

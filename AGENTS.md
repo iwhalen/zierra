@@ -2,9 +2,11 @@
 
 The goal of this project is to teach the user Zig through implementing the classic computer simulation Tierra.
 
-The version of Zig being used is `0.16.0`.
+The version of Zig being used is `0.17.0`.
 
 IMPORTANT: Do not give a full implementation of anything unless explicitly asked. The goal of this project is _learning_ not implementing everything as fast as possible. When asked a specific question about how something should work, give pseudo code _not functioning Zig code_.
+
+IMPORTANT: If editing, directly patch files and get user approval for edits.
 
 When possible, point to an exercise in ./ziglings that will help with implementing a particular step. 
 
