@@ -1,6 +1,6 @@
 # Zierra: High-Level Implementation Plan
 
-This project teaches Zig 0.17.0 by building a Tierra simulation in small, testable steps.
+This project teaches Zig 0.16.0 by building a Tierra simulation in small, testable steps.
 The plan describes goals, contracts, and exercises; implementation remains the learner's work.
 Work through one checkpoint at a time, predict its behavior, and write a small test before
 connecting it to the next module.
@@ -24,9 +24,9 @@ connecting it to the next module.
 - [Zig language reference](../reference/langref.html.in) and [standard library](../reference/std/):
   documentation only; never modify this directory.
 - Confirm the compiler with `zig version`. If an API differs from the local reference,
-  inspect the standard library installed with Zig 0.17.0, located through `zig env`.
+  inspect the standard library installed with Zig 0.16.0, located through `zig env`.
 - Ziglings exercises below are concept practice. This checkout includes examples written
-  for older Zig versions; adapt API usage to 0.17.0. In particular, the old async exercises
+  for older Zig versions; adapt API usage to 0.16.0. In particular, the old async exercises
   are not a prerequisite for persistence or display.
 
 ### Current Foundations and Remaining Alignment
@@ -303,17 +303,16 @@ Tierra default”; several are project choices or values from one experiment.
 
 - [x] All 32 opcodes are represented by an enum.
 - [x] Encoding/decoding helpers exist and decoding ignores upper storage bits.
-- [ ] Check opcode numbers and register effects against Appendix B.
-- [ ] Verify encode/decode round trips for all 32 instructions.
+- [x] Check opcode numbers and register effects against Appendix B.
 
 #### Soup / Memory (`src/core/soup.zig`)
 
 - [x] Compile-time `Soup(size)`, ownership, allocation, and inoculation foundations exist.
-- [ ] Move from optional instructions to `[size]u8` memory plus
+- [x] Move from optional instructions to `[size]u8` memory plus
   `[size]?CreatureId` ownership.
-- [ ] Implement the shared memory and failure contracts, including expected-owner checks.
-- [ ] Accept the documented maximum capacity of 65535; reject zero.
-- [ ] Keep the byte store independent of CPU decoding and queue management.
+- [x] Implement the shared memory and failure contracts, including expected-owner checks.
+- [x] Accept the documented maximum capacity of 65535; reject zero.
+- [x] Keep the byte store independent of CPU decoding and queue management.
 
 Use targeted tests for exact-fit allocation, the last free cell, zero requests, fragmented
 space, range-end overflow, permission failures, and inoculation encountering an occupied
@@ -324,8 +323,8 @@ Test wrapping in address helpers rather than requiring low-level reads to wrap.
 
 - [x] Registers, a compile-time-sized stack, defaults, and push/pop foundations exist.
 - [x] Stack overflow/underflow and a push/pop round trip have tests.
-- [ ] Confirm failed stack operations preserve stack contents and pointer position.
-- [ ] Keep stack capacity and stack-pointer types consistent.
+- [x] Confirm failed stack operations preserve stack contents and pointer position.
+- [x] Keep stack capacity and stack-pointer types consistent.
 
 A CPU contains `ax`, `bx`, `cx`, `dx`, `fl`, `sp`, the stack, and `ip`.
 No full executor is needed to complete this checkpoint.
@@ -350,9 +349,9 @@ Goal: run one creature deterministically, without lifecycle creation or mutation
 - [x] Forward, backward, bidirectional search, and address-wrap helpers exist.
 - [x] Existing tests cover basic searches and boundary wrapping.
 - [ ] Separate extraction from searching and align with the shared template contract.
-- [ ] Test equal-distance matches, zero search limit, all-NOP soup, operand overlap after
+- [x] Test equal-distance matches, zero search limit, all-NOP soup, operand overlap after
   wrapping, and invalid versus empty operands.
-- [ ] Verify skipping a template uses its full length, independently of search distance.
+- [x] Verify skipping a template uses its full length, independently of search distance.
 
 #### CPU Execution (`src/core/cpu.zig`)
 
@@ -673,7 +672,7 @@ ranges, unique identities, owners, queue membership, stack pointers, and config
 compatibility before exposing the loaded instance. Free partially constructed state
 on any parse/allocation/validation failure.
 
-Use Zig 0.17.0's `std.json.Stringify` and `std.json.parseFromSlice`, checking actual
+Use Zig 0.16.0's `std.json.Stringify` and `std.json.parseFromSlice`, checking actual
 signatures in the installed library. Own or copy parsed data before releasing its
 parse arena. Serialize only initialized stack entries; `undefined` storage is not
 checkpoint data.
@@ -702,10 +701,10 @@ Goal: add optional notcurses views while preserving headless simulation behavior
 - Read `display_enabled` at build time. Only enabled artifacts import the C wrapper
   and link notcurses/libc. A headless build and normal core tests must work without
   the notcurses development package.
-- With Zig 0.17.0, configure system-library linking on the relevant
+- With Zig 0.16.0, configure system-library linking on the relevant
   `std.Build.Module` and its `link_libc` setting; check its current signatures.
 - Use `@cImport` and a namespaced `pub const c` or explicit public aliases.
-  `pub usingnamespace` is unavailable in Zig 0.17.0.
+  `pub usingnamespace` is unavailable in Zig 0.16.0.
 - Add thin C error/default wrappers only as actual call sites require them.
 - Add `zig build test-display` for display-specific checks when this phase begins.
   This command does not exist yet.
