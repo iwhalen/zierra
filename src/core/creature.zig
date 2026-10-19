@@ -13,12 +13,16 @@ pub fn Creature(comptime CpuType: type) type {
         mother_alloc: Allocation,
         daughter_alloc: ?Allocation,
 
-        errors: u16 = 0,
+        errors: u32 = 0,
         instructions_executed: u16 = 0,
         instructions_copied: u16 = 0,
 
         parent_genotype: ?GenotypeId,
         origin_time: u16,
+
+        // Creatures know where they are in queues.
+        slicer_node: std.DoublyLinkedList.Node = .{},
+        reaper_node: std.DoublyLinkedList.Node = .{},
     };
 }
 

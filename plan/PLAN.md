@@ -348,7 +348,7 @@ Goal: run one creature deterministically, without lifecycle creation or mutation
 
 - [x] Forward, backward, bidirectional search, and address-wrap helpers exist.
 - [x] Existing tests cover basic searches and boundary wrapping.
-- [ ] Separate extraction from searching and align with the shared template contract.
+- [x] Separate extraction from searching and align with the shared template contract.
 - [x] Test equal-distance matches, zero search limit, all-NOP soup, operand overlap after
   wrapping, and invalid versus empty operands.
 - [x] Verify skipping a template uses its full length, independently of search distance.
