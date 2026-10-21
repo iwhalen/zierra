@@ -1,0 +1,98 @@
+const Instruction = @import("../core/instruction.zig").Instruction;
+
+pub const ancestor_genome: [80]Instruction = .{
+    // Beginning template (0–3).
+    .nop_1,
+    .nop_1,
+    .nop_1,
+    .nop_1,
+
+    // Locate the mother's beginning and calculate its size (4–22).
+    .zero,
+    .or1,
+    .shl,
+    .shl,
+    .mov_cd,
+    .adrb,
+    .nop_0,
+    .nop_0,
+    .nop_0,
+    .nop_0,
+    .sub_ac,
+    .mov_ab,
+    .adrf,
+    .nop_0,
+    .nop_0,
+    .nop_0,
+    .nop_1,
+    .inc_a,
+    .sub_ab,
+
+    // Reproduction loop: allocate, copy, divide, and repeat (23–39).
+    .nop_1,
+    .nop_1,
+    .nop_0,
+    .nop_1,
+    .mal,
+    .call,
+    .nop_0,
+    .nop_0,
+    .nop_1,
+    .nop_1,
+    .divide,
+    .jmp,
+    .nop_0,
+    .nop_0,
+    .nop_1,
+    .nop_0,
+    .if_cz,
+
+    // Copy procedure template and saved registers (40–46).
+    .nop_1,
+    .nop_1,
+    .nop_0,
+    .nop_0,
+    .push_ax,
+    .push_bx,
+    .push_cx,
+
+    // Copy loop (47–66).
+    .nop_1,
+    .nop_0,
+    .nop_1,
+    .nop_0,
+    .mov_iab,
+    .dec_c,
+    .if_cz,
+    .jmp,
+    .nop_0,
+    .nop_1,
+    .nop_0,
+    .nop_0,
+    .inc_a,
+    .inc_b,
+    .jmp,
+    .nop_0,
+    .nop_1,
+    .nop_0,
+    .nop_1,
+    .if_cz,
+
+    // Copy procedure exit: restore registers and return (67–74).
+    .nop_1,
+    .nop_0,
+    .nop_1,
+    .nop_1,
+    .pop_cx,
+    .pop_bx,
+    .pop_ax,
+    .ret,
+
+    // End template and separator (75–79).
+    .nop_1,
+    .nop_1,
+    .nop_1,
+    .nop_0,
+    .if_cz,
+};
+
