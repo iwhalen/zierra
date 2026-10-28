@@ -1,7 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const CreatureId = @import("creature.zig").CreatureId;
 const Instruction = @import("instruction.zig").Instruction;
 
 pub const SoupError = error{
@@ -28,14 +27,14 @@ pub fn Soup(comptime size: u16) type {
         const Self = @This();
 
         memory: [size]Instruction = .{.nop_0} ** size,
-        owner: [size]?CreatureId = .{null} ** size,
+        owner: [size]?u16 = .{null} ** size,
         comptime len: u16 = size,
 
         pub fn read(self: *const Self, address: u16) Instruction {
             return self.memory[address];
         }
 
-        pub fn write(self: *Self, address: u16, instruction: Instruction, writer_id: CreatureId) SoupError!void {
+        pub fn write(self: *Self, address: u16, instruction: Instruction, writer_id: u16) SoupError!void {
             if (self.owner[address] == writer_id) {
                 self.memory[address] = instruction;
             } else {
@@ -43,7 +42,7 @@ pub fn Soup(comptime size: u16) type {
             }
         }
 
-        pub fn allocate(self: *Self, request_size: u16, requester: CreatureId) SoupError!Allocation {
+        pub fn allocate(self: *Self, request_size: u16, requester: u16) SoupError!Allocation {
             var run_start: u16 = 0;
             var run_len: u16 = 0;
 
@@ -54,8 +53,9 @@ pub fn Soup(comptime size: u16) type {
                         run_start = @intCast(i);
                     }
 
-                    if (run_len == request_size) {
+                    run_len += 1;
 
+                    if (run_len == request_size) {
                         // Assign memory in the allocation range.
                         for (run_start..run_start + request_size) |j| {
                             self.owner[j] = requester;
@@ -63,11 +63,11 @@ pub fn Soup(comptime size: u16) type {
 
                         return Allocation{ .start = run_start, .len = request_size };
                     }
-                    run_len += 1;
                 } else {
                     run_len = 0;
                 }
             }
+
             return SoupError.NoFreeSoup;
         }
 
@@ -81,30 +81,18 @@ pub fn Soup(comptime size: u16) type {
             }
         }
 
-        pub fn count_free_memory(self: *const Self) u16 {
-            var count: u16 = 0;
-
-            for (self.owner) |owner| {
-                if (owner == null) count += 1;
-            }
-
-            return count;
-        }
-
-        pub fn inoculate(self: *Self, code: []const Instruction, address: u16, requester: CreatureId) SoupError!Allocation {
+        pub fn inoculate(self: *Self, code: []const Instruction, address: u16, requester: u16) SoupError!Allocation {
             if (code.len > self.memory.len) {
                 return SoupError.InvalidAllocation;
             }
 
-            if (self.count_free_memory() < code.len) {
-                return SoupError.NoFreeSoup;
-            }
-
-            for (code, address..) |code_i, i| {
+            for (address..address + code.len) |i| {
                 if (self.owner[i] != null) {
                     return SoupError.PermissionError;
                 }
+            }
 
+            for (code, address..) |code_i, i| {
                 self.owner[i] = requester;
                 try self.write(@intCast(i), code_i, requester);
             }
@@ -138,12 +126,36 @@ test "allocation, free round trip" {
     try testing.expectEqual(2, allocation.len);
 
     try testing.expectEqualSlices(Instruction, &[_]Instruction{ .inc_a, .nop_0, .nop_0, .nop_0, .nop_0 }, &soup.memory);
-    try testing.expectEqualSlices(?CreatureId, &[_]?CreatureId{ 0x123, 0x777, 0x777, null, null }, &soup.owner);
+    try testing.expectEqualSlices(?u16, &[_]?u16{ 0x123, 0x777, 0x777, null, null }, &soup.owner);
 
     try soup.free(allocation);
 
     try testing.expectEqualSlices(Instruction, &[_]Instruction{ .inc_a, .nop_0, .nop_0, .nop_0, .nop_0 }, &soup.memory);
-    try testing.expectEqualSlices(?CreatureId, &[_]?CreatureId{ 0x123, null, null, null, null }, &soup.owner);
+    try testing.expectEqualSlices(?u16, &[_]?u16{ 0x123, null, null, null, null }, &soup.owner);
+}
+
+test "allocation accepts an exact fit at the end of soup" {
+    var soup = Soup(5){};
+    soup.owner[0] = 0x123;
+    const memory_before = soup.memory;
+
+    const allocation = try soup.allocate(4, 0x777);
+
+    try testing.expectEqual(1, allocation.start);
+    try testing.expectEqual(4, allocation.len);
+    try testing.expectEqualSlices(?u16, &[_]?u16{ 0x123, 0x777, 0x777, 0x777, 0x777 }, &soup.owner);
+    try testing.expectEqualSlices(Instruction, &memory_before, &soup.memory);
+}
+
+test "allocation accepts an exact fit before an owned cell" {
+    var soup = Soup(5){};
+    soup.owner[4] = 0x123;
+
+    const allocation = try soup.allocate(4, 0x777);
+
+    try testing.expectEqual(0, allocation.start);
+    try testing.expectEqual(4, allocation.len);
+    try testing.expectEqualSlices(?u16, &[_]?u16{ 0x777, 0x777, 0x777, 0x777, 0x123 }, &soup.owner);
 }
 
 test "write permissions enforcement" {

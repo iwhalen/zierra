@@ -1,11 +1,13 @@
 const std = @import("std");
 const Allocation = @import("soup.zig").Allocation;
 
-pub const CreatureId = u16;
-
 pub fn Creature(comptime CpuType: type) type {
     return struct {
-        id: CreatureId,
+        // Reusable slot index for creature lookup and soup ownership.
+        slot_id: u16,
+
+        // Unique birth identity within a simulation; never reused after death.
+        organism_id: u64,
 
         // Each creature has its own CPU.
         cpu: CpuType,
@@ -14,11 +16,11 @@ pub fn Creature(comptime CpuType: type) type {
         daughter_alloc: ?Allocation,
 
         errors: u32 = 0,
-        instructions_executed: u16 = 0,
-        instructions_copied: u16 = 0,
+        instructions_executed: u64 = 0,
+        instructions_copied: u64 = 0,
 
         parent_genotype: ?GenotypeId,
-        origin_time: u16,
+        origin_time: u64,
 
         // Creatures know where they are in queues.
         slicer_node: std.DoublyLinkedList.Node = .{},

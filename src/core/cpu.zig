@@ -2,7 +2,6 @@ const std = @import("std");
 const testing = std.testing;
 const creature_module = @import("creature.zig");
 const Creature = creature_module.Creature;
-const CreatureId = creature_module.CreatureId;
 const instruction_module = @import("instruction.zig");
 const Instruction = instruction_module.Instruction;
 const soup_module = @import("soup.zig");
@@ -410,7 +409,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
             var copy_increment: u16 = 1;
             var return_value = ExecResult{ .none = {} };
 
-            soup.write(address_ax, instruction, creature.id) catch {
+            soup.write(address_ax, instruction, creature.slot_id) catch {
                 return_value = ExecResult{ .error_condition = {} };
                 self.fl = 1;
                 copy_increment = 0;
@@ -486,7 +485,8 @@ test "advance ip uses wrapped address" {
 
 fn test_creature(comptime stack_depth: u16, comptime search_limit: u16) Creature(CPU(stack_depth, search_limit)) {
     return .{
-        .id = 1,
+        .slot_id = 1,
+        .organism_id = 0,
         .cpu = CPU(stack_depth, search_limit){},
         .mother_alloc = .{ .start = 0, .len = 1 },
         .daughter_alloc = null,
@@ -1100,8 +1100,8 @@ test "divide reports the daughter allocation or an error when absent" {
     try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
     try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
     try testing.expect(creature.daughter_alloc != null);
-    try testing.expectEqual(@as(?CreatureId, 1), soup.owner[2]);
-    try testing.expectEqual(@as(?CreatureId, 1), soup.owner[3]);
+    try testing.expectEqual(@as(?u16, 1), soup.owner[2]);
+    try testing.expectEqual(@as(?u16, 1), soup.owner[3]);
 
     creature.daughter_alloc = null;
     try testing.expect(run_opcode(&creature, &soup, .divide) == .error_condition);

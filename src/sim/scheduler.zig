@@ -78,6 +78,7 @@ pub fn Scheduler(comptime CreatureType: type) type {
         }
     };
 }
+
 //
 // AI generated unit tests.
 //

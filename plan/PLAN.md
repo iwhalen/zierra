@@ -73,6 +73,8 @@ complete lifecycle operations before another instruction executes.
 Use compile-time parameters for capacities, stack depth, instruction definitions,
 ancestor bytes, and optional features. Keep mutable soup contents, ownership, creatures,
 queues, RNG state, and statistics at runtime.
+Runtime mutation does not itself require a host allocator: bounded state can live in
+fixed arrays whose capacities are known at compile time.
 
 Configuration comes from one typed object derived from `src/config.zon` through
 `@import`. Shape and behavior fields may live together; changing the production config
@@ -87,6 +89,9 @@ Fixed arrays specify layout, not where an instance lives. A full simulation can 
 choose its storage deliberately rather than assuming returning it by value or putting
 multiple instances on the stack is free. Once queues or RNG interfaces hold internal
 pointers, initialize the object in its final location and avoid moving it.
+Use caller-provided storage and in-place initialization for Phase 3. Put the production
+instance in static storage and small test instances in local storage. The simulation
+and its creatures use no host allocator in this phase.
 
 ---
 
@@ -153,9 +158,13 @@ include `PermissionError`, `NoFreeSoup`, and `InvalidAllocation`.
 A separate monotonically increasing `OrganismId: u64` identifies a birth for lineage
 and saved output. Slot reuse must never merge two organisms' histories.
 
-Start with stable creature objects, for example individually allocated creatures indexed
-by a growable table of pointers plus a free-slot list. A growing table may move its pointer
-entries; the creatures themselves must stay at stable addresses while linked.
+Start with a fixed creature pool embedded in the simulation, indexed directly by slot ID,
+with occupancy metadata and a fixed-capacity free-slot list. Use soup capacity as the
+initial slot capacity: every live creature owns at least one soup cell. This reserves
+maximum creature storage upfront in exchange for avoiding per-birth host allocation.
+Initialize a slot's creature only when claiming it; never inspect inactive creature data.
+Initialize the free-slot stack so fresh slots are acquired in ascending index order;
+push released slots onto the top for immediate reuse. Preserve this order across save/load.
 
 An `ArrayList(Creature)` that reallocates is incompatible with intrusive queue pointers.
 Do not compact or swap-remove live creatures if their indices identify ownership.
@@ -163,8 +172,9 @@ Bound simultaneous slots by soup capacity and handle slot exhaustion as an expli
 resource failure.
 
 Each live creature belongs to both queues exactly once, with separate link nodes.
-Remove it from both before destroying its storage or reusing its slot. A cached display
-selection must also validate the organism identity when a slot is reused.
+Remove it from both before marking its slot free. Reinitialize both nodes before slot
+reuse. The enclosing simulation must also stay in place while pointers refer into it.
+A cached display selection must validate the organism identity when a slot is reused.
 
 ### CPU Outcomes, Flags, and Counters
 
@@ -174,7 +184,7 @@ The execution outcome is a tagged union with one active variant:
 | --- | --- |
 | `none` | CPU-local work finished; no lifecycle request |
 | `mal_request(size)` | Simulation must allocate a daughter block |
-| `divide(allocation)` | Simulation must validate and complete division |
+| `divide` | Payload-free request; simulation must validate and complete division for the executing creature |
 | `error_condition` | Expected VM fault; record one error |
 | `hard_instruction_success` | Apply the configured reaper reward |
 
@@ -390,7 +400,7 @@ that transitional branch and its tests when every cell has a byte.
 | `adr` / `adrb` / `adrf` | Search bidirectionally/backward/forward; store match-end address in `ax` and operand length in `cx`; advance past own operand |
 | `mov_iab` | Copy one instruction from `[bx]` to `[ax]`, enforcing ownership; leave `ax` and `bx` unchanged |
 | `mal` | Advance IP and request allocation of `cx` cells |
-| `divide` | Advance IP and request division, or report an error when no daughter allocation exists |
+| `divide` | Advance IP and return a payload-free division request, or report an error when no daughter allocation exists |
 
 Appendix C's copy loop executes `inc_a` and `inc_b` separately. Incrementing them
 inside `mov_iab` would skip every other instruction and break the ancestor.
@@ -481,65 +491,205 @@ calculate size 80. Then trace allocation, copying, and division.
 
 #### Simulation (`src/sim/simulation.zig`)
 
-Create a small `Simulation(config)` with soup, creature storage, queues, and basic
-statistics. Introduce `init`/`deinit` with allocator ownership as needed. Keep
-genebank, persistence, and display dependencies out until their phases.
+Implement the checkpoints below in order. This section specifies the mutation-free,
+headless Phase 3 simulation. Use inline storage throughout; implement no allocator
+parameter, heap allocation, `deinit`, genebank, persistence, or display integration here.
 
-- Inoculation prepares a creature/slot, claims the complete seed range, initializes
-  CPU IP to its start, and links it into both queues. Failure cleans up preparation.
-- Complete each CPU outcome before executing the next instruction.
-- `mal`: reject an existing daughter or invalid size; claim a contiguous range for
-  the mother, store the daughter handle, and set `ax` to its start.
-  On allocation failure, preserve existing state and record one VM error.
-- `divide`: validate ownership, prepare the daughter object/slot, then transfer
-  ownership and publish the new creature to both queues. Clear the mother's daughter
-  handle only when the operation commits. On preparation failure, the mother keeps it.
-- Initialize the daughter's CPU with zeroed registers/flags, an empty stack, and IP at
-  its mother-allocation start. The daughter starts with no daughter allocation.
-- Do not require the copied counter to equal the allocation length before division;
-  old code in newly allocated cells is meaningful, and later organisms may copy
-  partially or use other creatures' code.
-- Death unlinks both nodes, frees both owned blocks, updates population, and releases
-  the slot/object. The instruction bytes remain in soup.
+**1. Define the concrete types and stored state.**
 
-`tick` executes one slice, handling results after each instruction. After its last
-instruction's mutation work, advance the slicer and reap while occupied memory exceeds
-the configured threshold, before recording that boundary's observations.
-`reaper_threshold = 0.8` means 80% occupied, hence 20% free; it is not a minimum
-free fraction of 80%. Derive a single integer occupied-cell threshold at startup
-using documented rounding, initially `floor(threshold * soup_size)`.
-Count gestating daughter allocations as occupied memory.
+Make `Simulation` a type factory with a `comptime config: anytype` parameter. Pass a
+configuration value containing `soup_size`, `stack_depth`, `search_limit`, `rng_seed`,
+`reaper_threshold`, and `slicer_power`; in `main`, build that value from the constants
+exported by `src/config.zig`. Tests pass small configuration values directly. An imported
+configuration module is a namespace, not the type of a configuration value.
+Inside the factory, define aliases for
+`Soup(config.soup_size)`, `CPU(config.stack_depth, config.search_limit)`,
+`Creature(CpuType)`, and `Scheduler(CreatureType)`.
 
-Initially a fragmented/no-space `mal` fails; reaping occurs at slice boundaries.
-Do not introduce hidden allocation retries or kill the executing mother inside
-allocation handling without revisiting this scheduling policy.
+Store the following state, where `N` is `config.soup_size`:
 
-Stop cleanly when no creatures remain. Define `run(max_instructions)` as executing
-at most that many additional instructions, including a partial final slice.
-Preserve the current creature and its remaining slice budget if a run is paused
-mid-slice. Complete end-of-slice scheduling/reaping even when the final allowed
-instruction exhausts a slice, so splitting a run does not change its scheduling. A zero budget executes nothing. Prevent huge slices from delaying
-pause/quit handling indefinitely by polling at bounded instruction intervals.
+| Field | Type / contents |
+| --- | --- |
+| `soup` | Concrete soup instance |
+| `creatures` | Fixed array of `N` concrete creatures |
+| `active` | Fixed array of `N` booleans |
+| `free_slots` | Fixed array of `N` `CreatureId` values, used as a stack |
+| `free_count` | `u16`; number of entries currently on that stack |
+| `scheduler` | Concrete scheduler instance; owns both queues and their current cursor |
+| `soup_rng` | `std.Random.Xoshiro256`; used only to initialize soup bytes |
+| `occupied_cells` | `u16`; includes mother and gestating daughter allocations |
+| `instructions_executed` | `u64`; global instruction time |
+| `next_organism_id` | `u64`; next birth identity |
+| `slice_remaining` | `u64`; zero means no slice is currently in progress |
+| `occupied_limit` | `u16`; precomputed reaping threshold |
 
-Tests and exit criteria:
+Update `Creature` before integrating it: add `organism_id: u64`, widen birth time and
+executed/copied counters to `u64`, and retain `u32` errors and the two intrusive nodes.
+Set its existing optional parent-genotype field to null in Phase 3.
+Use saturating increments for creature execution/copy/error counters. Before executing
+an instruction at the maximum global time, return `InstructionLimitReached` without
+changing state. Reserve the maximum `u64` organism ID as an exhaustion marker: birth
+returns `OrganismIdExhausted` when `next_organism_id` reaches it.
 
-- [ ] Inoculation creates one correctly owned, scheduled creature.
-- [ ] With all mutation rates disabled, the ancestor produces an identical 80-byte daughter.
-- [ ] The daughter can reproduce too; population growth is not only a one-birth artifact.
-- [ ] Allocation/division failures preserve ownership and queue invariants.
-- [ ] Reaping frees gestating daughter memory and handles extinction.
-- [ ] Threshold checks, exact run budgets, and empty queues behave as specified.
+**2. Implement empty initialization and slot lookup.**
 
-Learning checkpoint: explain the difference between soup allocation and host allocation,
-and demonstrate why live queue pointers require stable creature addresses.
+Implement `init` on a mutable pointer to the final simulation storage. It returns no
+value and no error. Initialize each field directly; inactive creature payloads remain
+uninitialized. Do not copy or return the initialized simulation by value.
+
+1. Seed `soup_rng` with `config.rng_seed`. Fill soup in ascending address order, taking
+   one `soup_rng.next()` result per cell and storing its low five bits as the byte.
+   Set every ownership entry to null. This defines the Phase 3 initialization sequence.
+2. Set every `active` entry to false. Fill `free_slots` in descending slot order and
+   set `free_count` to `N`, so popping yields slots 0, 1, 2, and so on.
+3. Initialize the scheduler with empty queues and a null current cursor. Set population,
+   occupied cells, global time, next organism ID, and remaining slice budget to zero.
+4. Compute `occupied_limit` as `floor(reaper_threshold * N)`, widening the configured
+   float to `f64` before multiplication and narrowing only the floored result.
+
+Implement `get_creature(id)` returning a mutable pointer for an active, in-range slot
+and null otherwise. Implement private `acquire_slot` and `release_slot` helpers.
+Acquisition pops the free-slot stack; exhaustion returns `NoFreeSlots`. Release marks
+the slot inactive and pushes its ID back onto the stack. Never read an inactive creature
+or move a live creature to another index.
+
+**3. Implement inoculation.**
+
+Implement `inoculate(code, address)` returning the new slot ID or an error. Accept a
+slice of instruction bytes. Validate a nonempty, nonwrapping range, every destination
+cell's lack of ownership, slot availability, and organism-ID availability before making
+any change. Preserve the full simulation on failure,
+including soup bytes, free-slot order, and the next organism ID.
+
+On success, claim the slot and seed range, copy the canonical low five bits of each
+input byte, and initialize the creature in its pool position. Assign its slot ID,
+next organism ID, mother allocation, and birth time equal to current global time.
+Set CPU registers/flags to zero, stack pointer to zero, IP to the allocation start,
+daughter allocation to null, counters to zero, parent genotype to null, and both nodes
+to their empty defaults. Leave unused CPU stack entries uninitialized.
+Mark the slot active, increment population and occupied cells, advance the organism-ID
+counter, and call `scheduler.add_initial`. The first inoculated creature becomes current;
+inoculation leaves `slice_remaining` unchanged.
+
+In `main`, declare one production simulation in static storage, call `init` on its
+address, and inoculate the ancestor at address zero before running any instructions.
+Use small local simulation instances in unit tests; the empty initializer must also
+work with soups smaller than the ancestor.
+
+**4. Implement the lifecycle outcome handlers.**
+
+Implement private handlers for `mal_request` and `divide`, and a private `kill` helper.
+Keep these operations separate from CPU instruction execution.
+
+- `mal_request(size)`: reject a mother that already has a daughter allocation. Reject
+  zero or oversized requests. Ask soup for a first-fit contiguous range owned by the
+  mother's slot. On success, store the daughter allocation, set `ax` to its start,
+  increase occupied cells, and call `scheduler.on_hard_success` once. Preserve existing
+  handles, `ax`, bytes, and ownership on failure. Do not reap or retry inside this handler.
+- `divide(creature)`: read the mother's recorded daughter allocation from the executing
+  creature, rejecting division if it is absent. Verify that the allocation is valid and
+  disjoint from her mother allocation, and that every cell is owned by the mother.
+  Check slot and organism-ID
+  availability before committing. Initialize the child's pool slot with the same birth
+  defaults as inoculation, using the existing daughter block as its mother allocation.
+  Transfer that block's ownership to the child's slot, activate the slot, increment
+  population and next organism ID, clear the mother's daughter handle, and call
+  `scheduler.add_child`. Leave occupied cells unchanged. Keep the mother's current slice
+  budget. Failure leaves all lifecycle state unchanged, including free-slot order.
+  Division does not check the mother's copy counter or require every byte to be copied.
+- `kill(id)`: validate that the slot is active and both recorded allocations are valid,
+  disjoint, and owned by it before changing state. Remove the creature from both queues,
+  free both allocations, subtract their lengths from occupied cells, decrement population,
+  reset its link nodes, and release the slot. Preserve all instruction bytes. When the
+  current creature is removed, clear its remaining slice budget; the scheduler selects
+  its successor. Return a validation error without mutation for an invalid request.
+
+For a failed `mal_request` or `divide`, set the executing CPU's flag to 1 and call
+`scheduler.on_error` exactly once. These are VM failures; continue execution. Successful
+lifecycle instructions leave the flag at zero. Do not advance IP in these handlers;
+the CPU has already advanced it.
+Use `InvalidAllocation` for invalid lifecycle handles/sizes and invalid death slots,
+and `PermissionError` for owner mismatches. Slot and identity exhaustion use the errors
+defined above. Finish all validation before claiming a slot or transferring ownership.
+
+**5. Implement one completed instruction.**
+
+Implement `step` returning true after executing one instruction, false for an empty
+population, or `InstructionLimitReached` before global time would overflow.
+
+1. Return false for an empty population. Check the global instruction limit before
+   changing any state.
+2. Obtain the scheduler's current creature. When `slice_remaining` is zero, calculate
+   its budget from its mother-allocation length: `floor(length ^ slicer_power)`, using
+   `f64` arithmetic. Use 1 for results below 1 and the maximum `u64` for results at or
+   above 2^64, including positive infinity. Otherwise narrow the floored result to `u64`.
+3. Call that creature's CPU `step` once. The CPU clears the flag, updates IP, and counts
+   the creature's execution. Increment global instruction time exactly once afterward.
+4. Complete the returned outcome before another instruction executes: `none` does
+   nothing; allocation/division use the handlers above, passing the executing creature
+   to `divide`; `error_condition` sets the flag
+   and calls `scheduler.on_error` once; `hard_instruction_success` calls
+   `scheduler.on_hard_success` once. Births use the incremented global time.
+5. Decrement `slice_remaining`. When it reaches zero, call `scheduler.advance`, then
+   repeatedly kill `scheduler.next_victim` while occupied cells exceed `occupied_limit`.
+   Finish all reaping before returning true. Empty queues retain a null current cursor
+   and a zero remaining budget.
+
+An occupancy equal to the limit does not trigger reaping. With threshold 0.8 and
+100 cells, reaping starts above 80 occupied cells. A failed fragmented allocation
+records one VM error and waits for the normal slice boundary; it triggers no early reap.
+
+**6. Implement slice and bounded-run entry points.**
+
+- `tick`: repeatedly call `step` until the current slice finishes or population becomes
+  empty. Starting with a partially consumed slice finishes only that slice. Return the
+  number of instructions executed and propagate `InstructionLimitReached`.
+- `run(max_instructions)`: call `step` at most that many times, stopping on extinction.
+  Return the number actually executed and propagate `InstructionLimitReached`.
+  A zero budget changes nothing. Preserve the current cursor and partial slice budget
+  between calls. Because `step` completes boundary work before returning, exhausting
+  a run budget on the last instruction of a slice still performs advancement and reaping.
+
+**7. Add tests and connect the simulation test root.**
+
+Import the simulation module into the test graph reached by `zig build test`. Complete
+these tests with small, hand-checkable soups before running ancestor replication:
+compare initialized fields and live creature payloads, never raw struct bytes or inactive
+payloads. For slot/identity exhaustion, construct the boundary state directly in the test.
+
+- [ ] Empty initialization: canonical soup bytes, no owners, all slots free, empty queues,
+      zero counters, next organism ID zero, and the expected floored occupancy limit.
+- [ ] Equal configs/seeds produce identical initialized bytes and RNG state.
+- [ ] Slot acquisition uses ascending fresh IDs; released slots are reused first;
+      inactive/out-of-range lookups return null and reused slots receive new organism IDs.
+- [ ] Inoculation initializes every live field and both queues. Empty, out-of-range,
+      occupied, slot-exhausted, and identity-exhausted attempts leave the full state intact.
+- [ ] Successful allocation reserves cells and rewards once; duplicate, invalid, and
+      fragmented requests preserve lifecycle state and record exactly one VM error.
+- [ ] Division transfers ownership, creates a zeroed child at the incremented birth time,
+      preserves the mother's remaining budget, and does not change occupied cells.
+      Missing, invalid, overlapping, or wrongly owned daughter handles leave lifecycle
+      state intact.
+- [ ] Death releases mother and gestating daughter memory, preserves code, unlinks both
+      queues, and permits slot reuse. Invalid ownership changes nothing.
+- [ ] Reaping uses a strict greater-than comparison, removes multiple victims when
+      required, and handles singleton extinction and removal of the selected next creature.
+- [ ] CPU faults and failed lifecycle requests increment errors once; every executed
+      instruction increments global time once. Global-time exhaustion changes nothing.
+- [ ] Empty `step`/`tick`/`run` execute nothing; zero-budget runs change nothing. Compare
+      `run(A + B)` with `run(A)` followed by `run(B)`, including partial slices and a
+      budget ending exactly at a reaping boundary.
+- [ ] With mutations absent, the ancestor produces an identical 80-byte daughter, then
+      that daughter reproduces. Compare ownership, CPU initialization, and queue membership
+      as well as genome bytes.
 
 Useful Ziglings:
+[004_arrays](../ziglings/exercises/004_arrays.zig),
 [043_pointers5](../ziglings/exercises/043_pointers5.zig),
+[045_optionals](../ziglings/exercises/045_optionals.zig),
 [047_methods](../ziglings/exercises/047_methods.zig),
-[029_errdefer](../ziglings/exercises/029_errdefer.zig),
-[096_memory_allocation](../ziglings/exercises/096_memory_allocation.zig), and
+[066_comptime](../ziglings/exercises/066_comptime.zig), and
 [102_testing](../ziglings/exercises/102_testing.zig).
-There is no dedicated linked-list exercise in this checkout; use a small local queue test.
 
 ### Phase 4: Evolution & Lineage
 
@@ -570,6 +720,11 @@ to force edge cases. Do not write probabilistic tests that sometimes fail becaus
 mutation happened.
 
 #### Genebank & Statistics (`src/sim/genebank.zig`)
+
+Unlike the live population, historical genotype storage is not bounded by soup capacity:
+new genotypes can accumulate after earlier organisms die. Introduce an explicit host
+allocator and cleanup lifetime here if using growable storage. A fixed-storage alternative
+requires a documented history limit and an explicit exhaustion or retention policy.
 
 A creature records its birth genotype. Cosmic mutation may change its living bytes
 without changing that historical identity; census counts are initially by birth
@@ -754,7 +909,7 @@ Profile instruction dispatch, allocation scans, queue operations, and rendering 
 after deterministic replication and replay tests pass. Benchmark headless runs with
 output disabled to separate simulation cost from I/O cost.
 
-Possible later exercises include alternative stable-storage pools, allocation indexing,
+Possible later exercises include more compact stable-storage pools, allocation indexing,
 buffered/threaded writers, and specialized dispatch. Preserve the established behavior
 with fixed-seed comparisons; do not add these before a measured need or explicit
 learning objective.
@@ -840,7 +995,8 @@ runs, and structural invariants for larger runs.
 | Addressing | Circular CPU access, linear allocations, `u16` addresses | Explicit bounds without split allocation handles |
 | Register arithmetic | Defined 16-bit wrapping, separate from address normalization | Mutated programs cannot rely on host overflow behavior |
 | Config | Typed compile-time object from one ZON file | One production source of truth; small test configurations |
-| Creature storage | Stable objects, slot lookup, free-slot list | Intrusive pointers survive lookup-table growth |
+| Creature storage | Inline fixed pool bounded by soup capacity, occupancy metadata, free-slot list | Stable addresses and no per-birth host allocation |
+| Simulation initialization | Initialize caller-provided final storage in place, then inoculate separately | Explicit storage ownership; internal pointers remain valid |
 | Identity | Reusable slot ID plus persistent organism ID | Fast ownership checks and unambiguous lineage |
 | Queues | Separate intrusive slicer/reaper nodes | Constant-time linking with explicit lifetime rules |
 | RNG | Separate explicitly seeded streams | Reproducible evolution independent of observation |
