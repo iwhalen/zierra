@@ -87,7 +87,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
         pub fn step(self: *Self, soup: anytype, creature: anytype) ExecResult {
             const result = self.execute(soup.read(self.ip), soup, creature);
 
-            creature.instructions_executed += 1;
+            creature.instructions_executed +|= 1;
 
             return result;
         }
@@ -415,7 +415,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                 copy_increment = 0;
             };
 
-            creature.instructions_copied += copy_increment;
+            creature.instructions_copied +|= copy_increment;
             self.advance_ip(1, soup.len);
 
             return return_value;
