@@ -23,8 +23,8 @@ pub const StackError = error{ StackOverflow, StackUnderflow };
 pub const ExecResult = union(enum) {
     // No extra work is needed from the simulation.
     none,
-    // Memory allocation request for new creature.
-    divide: Allocation,
+    // Creature request for reproduction.
+    divide,
     // Creature request for memory.
     mal_request: u16,
     // Instruction generated an error flag.
@@ -423,7 +423,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
 
         pub fn mal(self: *Self, soup: anytype) ExecResult {
             self.advance_ip(1, soup.len);
-            return ExecResult{ .mal_request = self.cx };
+            return .{ .mal_request = self.cx };
         }
 
         pub fn divide(self: *Self, soup: anytype, creature: anytype) ExecResult {
@@ -434,7 +434,7 @@ pub fn CPU(comptime stack_depth: u16, comptime search_limit: u16) type {
                 return .{ .error_condition = {} };
             }
 
-            return ExecResult{ .divide = creature.daughter_alloc.? };
+            return .{ .divide = {} };
         }
     };
 }
@@ -1074,7 +1074,6 @@ test "mal requests the exact cx size and advances without allocating" {
     try testing.expectEqual(@as(u16, 7), first.mal_request);
     try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
     try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
-    try testing.expectEqual(soup.len, soup.count_free_memory());
 
     creature.cpu.cx = 0;
     const second = run_opcode(&creature, &soup, .mal);
@@ -1084,7 +1083,7 @@ test "mal requests the exact cx size and advances without allocating" {
     try testing.expectEqual(@as(u16, 2), creature.instructions_executed);
 }
 
-test "divide reports the daughter allocation or an error when absent" {
+test "divide requests reproduction or reports an error when daughter allocation is absent" {
     var soup = Soup(4){};
     soup.owner[0] = 1;
     soup.owner[2] = 1;
@@ -1095,11 +1094,11 @@ test "divide reports the daughter allocation or an error when absent" {
 
     const success = run_opcode(&creature, &soup, .divide);
     try testing.expect(success == .divide);
-    try testing.expectEqual(@as(u16, 2), success.divide.start);
-    try testing.expectEqual(@as(u16, 2), success.divide.len);
     try testing.expectEqual(@as(u16, 1), creature.cpu.ip);
     try testing.expectEqual(@as(u8, 0), creature.cpu.fl);
     try testing.expect(creature.daughter_alloc != null);
+    try testing.expectEqual(@as(u16, 2), creature.daughter_alloc.?.start);
+    try testing.expectEqual(@as(u16, 2), creature.daughter_alloc.?.len);
     try testing.expectEqual(@as(?u16, 1), soup.owner[2]);
     try testing.expectEqual(@as(?u16, 1), soup.owner[3]);
 

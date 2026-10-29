@@ -456,212 +456,54 @@ Goal: make the ancestor reproduce in a mutation-free, headless simulation.
 
 #### Scheduler (`src/sim/scheduler.zig`)
 
-Start with a small queue exercise before adding both queues to the simulation.
-Intrusive doubly linked queues use the stable-storage contract above.
-
-- Slicer: circular round-robin queue, separate current cursor, insert/remove operations.
-- Insert a newborn immediately before its mother in traversal order. For
-  `mother -> A -> B -> mother`, birth produces
-  `mother -> A -> B -> daughter -> mother`. The daughter does not immediately
-  receive the remainder of the mother's slice.
-- Slice size is `floor(genome_size ^ slicer_power)`, clamped to at least 1.
-  Validate/clamp before narrowing to the chosen budget type; large powers must not
-  overflow a `u16` conversion. A `u64` budget is suitable for long slices.
-- Reaper: linear queue; newborns enter at the bottom and victims come from the top.
-- On error, move up one position only if the neighbor above has no more errors.
-  On a hard-instruction success, move down one position only if the neighbor below
-  has at least as many errors. This is a local movement rule, not a globally sorted list.
-- Define empty and singleton behavior. Queue access must be optional when empty.
-  Removing a cursor target must leave a valid successor or an empty queue.
-
-Test round-robin order, the explicit birth example, singleton removal, current-cursor
-removal, movements blocked by neighbor error counts, and simultaneous membership
-in both queues.
+Implemented with tests for round-robin traversal, birth order, cursor removal,
+empty/singleton queues, local reaper movements, and membership in both queues.
+The queues depend on the stable-storage contract above.
 
 #### Ancestor (`src/sim/ancestor.zig`)
 
-Transcribe the 80-instruction `0080aaa` genome from Appendix C as constant bytes.
-Validate exact length, canonical opcode values, and fit in the selected soup.
-“Every byte decodes” alone is insufficient validation because decoding masks every
-possible byte into some instruction.
+The 80-instruction `0080aaa` genome is transcribed as `[80]Instruction`.
 
-First trace its self-examination: at base 0, `adrb` finds match-end 4,
+- [ ] Verify the transcription against Appendix C and its fit in the selected soup.
+- [ ] Trace its self-examination: at base 0, `adrb` finds match-end 4,
 `sub_ac` obtains base 0, `adrf` finds match-end 79, and `inc_a`/`sub_ab`
 calculate size 80. Then trace allocation, copying, and division.
 
 #### Simulation (`src/sim/simulation.zig`)
 
-Implement the checkpoints below in order. This section specifies the mutation-free,
-headless Phase 3 simulation. Use inline storage throughout; implement no allocator
-parameter, heap allocation, `deinit`, genebank, persistence, or display integration here.
+The type factory, in-place initialization, inoculation, allocation/division/death,
+instruction stepping, slice-boundary reaping, and bounded `run` entry point are
+implemented. Creature identities and widened counters are present, and `src/root.zig`
+imports the simulation into the test graph.
 
-**1. Define the concrete types and stored state.**
+The implementation uses `[N]?CreatureType` for occupancy and an `ArrayList(u16)` backed
+by an inline buffer for free slots. These replace the proposed separate active flags,
+free-count field, and slot helpers; no host allocator is needed. Soup initialization
+uses a local seeded RNG, so there is no stored Phase 3 RNG state to compare.
+Keep the simulation in its final storage while buffer and queue pointers refer into it.
+Genebank, persistence, display, and mutation integration belong to later phases.
 
-Make `Simulation` a type factory with a `comptime config: anytype` parameter. Pass a
-configuration value containing `soup_size`, `stack_depth`, `search_limit`, `rng_seed`,
-`reaper_threshold`, and `slicer_power`; in `main`, build that value from the constants
-exported by `src/config.zig`. Tests pass small configuration values directly. An imported
-configuration module is a namespace, not the type of a configuration value.
-Inside the factory, define aliases for
-`Soup(config.soup_size)`, `CPU(config.stack_depth, config.search_limit)`,
-`Creature(CpuType)`, and `Scheduler(CreatureType)`.
+Remaining implementation work:
 
-Store the following state, where `N` is `config.soup_size`:
+- [ ] Use saturating increments for creature execution/copy counters in
+      `src/core/cpu.zig`; they currently use ordinary addition. Error counts already
+      saturate in the scheduler.
+- [ ] In `main`, inoculate the ancestor at address zero after initialization and run
+      a bounded mutation-free simulation. Static production storage is already present.
 
-| Field | Type / contents |
-| --- | --- |
-| `soup` | Concrete soup instance |
-| `creatures` | Fixed array of `N` concrete creatures |
-| `active` | Fixed array of `N` booleans |
-| `free_slots` | Fixed array of `N` `CreatureId` values, used as a stack |
-| `free_count` | `u16`; number of entries currently on that stack |
-| `scheduler` | Concrete scheduler instance; owns both queues and their current cursor |
-| `soup_rng` | `std.Random.Xoshiro256`; used only to initialize soup bytes |
-| `occupied_cells` | `u16`; includes mother and gestating daughter allocations |
-| `instructions_executed` | `u64`; global instruction time |
-| `next_organism_id` | `u64`; next birth identity |
-| `slice_remaining` | `u64`; zero means no slice is currently in progress |
-| `occupied_limit` | `u16`; precomputed reaping threshold |
+Remaining verification:
 
-Update `Creature` before integrating it: add `organism_id: u64`, widen birth time and
-executed/copied counters to `u64`, and retain `u32` errors and the two intrusive nodes.
-Set its existing optional parent-genotype field to null in Phase 3.
-Use saturating increments for creature execution/copy/error counters. Before executing
-an instruction at the maximum global time, return `InstructionLimitReached` without
-changing state. Reserve the maximum `u64` organism ID as an exhaustion marker: birth
-returns `OrganismIdExhausted` when `next_organism_id` reaches it.
-
-**2. Implement empty initialization and slot lookup.**
-
-Implement `init` on a mutable pointer to the final simulation storage. It returns no
-value and no error. Initialize each field directly; inactive creature payloads remain
-uninitialized. Do not copy or return the initialized simulation by value.
-
-1. Seed `soup_rng` with `config.rng_seed`. Fill soup in ascending address order, taking
-   one `soup_rng.next()` result per cell and storing its low five bits as the byte.
-   Set every ownership entry to null. This defines the Phase 3 initialization sequence.
-2. Set every `active` entry to false. Fill `free_slots` in descending slot order and
-   set `free_count` to `N`, so popping yields slots 0, 1, 2, and so on.
-3. Initialize the scheduler with empty queues and a null current cursor. Set population,
-   occupied cells, global time, next organism ID, and remaining slice budget to zero.
-4. Compute `occupied_limit` as `floor(reaper_threshold * N)`, widening the configured
-   float to `f64` before multiplication and narrowing only the floored result.
-
-Implement `get_creature(id)` returning a mutable pointer for an active, in-range slot
-and null otherwise. Implement private `acquire_slot` and `release_slot` helpers.
-Acquisition pops the free-slot stack; exhaustion returns `NoFreeSlots`. Release marks
-the slot inactive and pushes its ID back onto the stack. Never read an inactive creature
-or move a live creature to another index.
-
-**3. Implement inoculation.**
-
-Implement `inoculate(code, address)` returning the new slot ID or an error. Accept a
-slice of instruction bytes. Validate a nonempty, nonwrapping range, every destination
-cell's lack of ownership, slot availability, and organism-ID availability before making
-any change. Preserve the full simulation on failure,
-including soup bytes, free-slot order, and the next organism ID.
-
-On success, claim the slot and seed range, copy the canonical low five bits of each
-input byte, and initialize the creature in its pool position. Assign its slot ID,
-next organism ID, mother allocation, and birth time equal to current global time.
-Set CPU registers/flags to zero, stack pointer to zero, IP to the allocation start,
-daughter allocation to null, counters to zero, parent genotype to null, and both nodes
-to their empty defaults. Leave unused CPU stack entries uninitialized.
-Mark the slot active, increment population and occupied cells, advance the organism-ID
-counter, and call `scheduler.add_initial`. The first inoculated creature becomes current;
-inoculation leaves `slice_remaining` unchanged.
-
-In `main`, declare one production simulation in static storage, call `init` on its
-address, and inoculate the ancestor at address zero before running any instructions.
-Use small local simulation instances in unit tests; the empty initializer must also
-work with soups smaller than the ancestor.
-
-**4. Implement the lifecycle outcome handlers.**
-
-Implement private handlers for `mal_request` and `divide`, and a private `kill` helper.
-Keep these operations separate from CPU instruction execution.
-
-- `mal_request(size)`: reject a mother that already has a daughter allocation. Reject
-  zero or oversized requests. Ask soup for a first-fit contiguous range owned by the
-  mother's slot. On success, store the daughter allocation, set `ax` to its start,
-  increase occupied cells, and call `scheduler.on_hard_success` once. Preserve existing
-  handles, `ax`, bytes, and ownership on failure. Do not reap or retry inside this handler.
-- `divide(creature)`: read the mother's recorded daughter allocation from the executing
-  creature, rejecting division if it is absent. Verify that the allocation is valid and
-  disjoint from her mother allocation, and that every cell is owned by the mother.
-  Check slot and organism-ID
-  availability before committing. Initialize the child's pool slot with the same birth
-  defaults as inoculation, using the existing daughter block as its mother allocation.
-  Transfer that block's ownership to the child's slot, activate the slot, increment
-  population and next organism ID, clear the mother's daughter handle, and call
-  `scheduler.add_child`. Leave occupied cells unchanged. Keep the mother's current slice
-  budget. Failure leaves all lifecycle state unchanged, including free-slot order.
-  Division does not check the mother's copy counter or require every byte to be copied.
-- `kill(id)`: validate that the slot is active and both recorded allocations are valid,
-  disjoint, and owned by it before changing state. Remove the creature from both queues,
-  free both allocations, subtract their lengths from occupied cells, decrement population,
-  reset its link nodes, and release the slot. Preserve all instruction bytes. When the
-  current creature is removed, clear its remaining slice budget; the scheduler selects
-  its successor. Return a validation error without mutation for an invalid request.
-
-For a failed `mal_request` or `divide`, set the executing CPU's flag to 1 and call
-`scheduler.on_error` exactly once. These are VM failures; continue execution. Successful
-lifecycle instructions leave the flag at zero. Do not advance IP in these handlers;
-the CPU has already advanced it.
-Use `InvalidAllocation` for invalid lifecycle handles/sizes and invalid death slots,
-and `PermissionError` for owner mismatches. Slot and identity exhaustion use the errors
-defined above. Finish all validation before claiming a slot or transferring ownership.
-
-**5. Implement one completed instruction.**
-
-Implement `step` returning true after executing one instruction, false for an empty
-population, or `InstructionLimitReached` before global time would overflow.
-
-1. Return false for an empty population. Check the global instruction limit before
-   changing any state.
-2. Obtain the scheduler's current creature. When `slice_remaining` is zero, calculate
-   its budget from its mother-allocation length: `floor(length ^ slicer_power)`, using
-   `f64` arithmetic. Use 1 for results below 1 and the maximum `u64` for results at or
-   above 2^64, including positive infinity. Otherwise narrow the floored result to `u64`.
-3. Call that creature's CPU `step` once. The CPU clears the flag, updates IP, and counts
-   the creature's execution. Increment global instruction time exactly once afterward.
-4. Complete the returned outcome before another instruction executes: `none` does
-   nothing; allocation/division use the handlers above, passing the executing creature
-   to `divide`; `error_condition` sets the flag
-   and calls `scheduler.on_error` once; `hard_instruction_success` calls
-   `scheduler.on_hard_success` once. Births use the incremented global time.
-5. Decrement `slice_remaining`. When it reaches zero, call `scheduler.advance`, then
-   repeatedly kill `scheduler.next_victim` while occupied cells exceed `occupied_limit`.
-   Finish all reaping before returning true. Empty queues retain a null current cursor
-   and a zero remaining budget.
-
-An occupancy equal to the limit does not trigger reaping. With threshold 0.8 and
-100 cells, reaping starts above 80 occupied cells. A failed fragmented allocation
-records one VM error and waits for the normal slice boundary; it triggers no early reap.
-
-**6. Implement slice and bounded-run entry points.**
-
-- `tick`: repeatedly call `step` until the current slice finishes or population becomes
-  empty. Starting with a partially consumed slice finishes only that slice. Return the
-  number of instructions executed and propagate `InstructionLimitReached`.
-- `run(max_instructions)`: call `step` at most that many times, stopping on extinction.
-  Return the number actually executed and propagate `InstructionLimitReached`.
-  A zero budget changes nothing. Preserve the current cursor and partial slice budget
-  between calls. Because `step` completes boundary work before returning, exhausting
-  a run budget on the last instruction of a slice still performs advancement and reaping.
-
-**7. Add tests and connect the simulation test root.**
-
-Import the simulation module into the test graph reached by `zig build test`. Complete
-these tests with small, hand-checkable soups before running ancestor replication:
-compare initialized fields and live creature payloads, never raw struct bytes or inactive
-payloads. For slot/identity exhaustion, construct the boundary state directly in the test.
+Simulation tests currently cover `valid_allocation` only. Add small, hand-checkable
+lifecycle tests that instantiate the factory and exercise its methods before running
+ancestor replication. Compare initialized fields and live creature payloads, never raw
+struct bytes, unused stack entries, or inactive payloads. For slot/identity exhaustion,
+construct the boundary state directly in the test.
 
 - [ ] Empty initialization: canonical soup bytes, no owners, all slots free, empty queues,
       zero counters, next organism ID zero, and the expected floored occupancy limit.
-- [ ] Equal configs/seeds produce identical initialized bytes and RNG state.
+- [ ] Equal configs/seeds produce identical initialized instructions.
 - [ ] Slot acquisition uses ascending fresh IDs; released slots are reused first;
-      inactive/out-of-range lookups return null and reused slots receive new organism IDs.
+      reused slots receive new organism IDs.
 - [ ] Inoculation initializes every live field and both queues. Empty, out-of-range,
       occupied, slot-exhausted, and identity-exhausted attempts leave the full state intact.
 - [ ] Successful allocation reserves cells and rewards once; duplicate, invalid, and
@@ -676,7 +518,9 @@ payloads. For slot/identity exhaustion, construct the boundary state directly in
       required, and handles singleton extinction and removal of the selected next creature.
 - [ ] CPU faults and failed lifecycle requests increment errors once; every executed
       instruction increments global time once. Global-time exhaustion changes nothing.
-- [ ] Empty `step`/`tick`/`run` execute nothing; zero-budget runs change nothing. Compare
+- [ ] Slice budgets clamp to at least 1 and at most the maximum `u64`, including
+      powers too large to represent as a finite `f64`.
+- [ ] Empty `step`/`run` execute nothing; zero-budget runs change nothing. Compare
       `run(A + B)` with `run(A)` followed by `run(B)`, including partial slices and a
       budget ending exactly at a reaping boundary.
 - [ ] With mutations absent, the ancestor produces an identical 80-byte daughter, then

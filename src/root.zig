@@ -1,7 +1,11 @@
 const std = @import("std");
-const config = @import("config.zig");
-const Simulation = @import("sim/simulation.zig");
+pub const config = @import("config.zig");
+pub const Simulation = @import("sim/simulation.zig").Simulation;
 const ancestor_genome = @import("sim/ancestor.zig").ancestor_genome;
+
+test {
+    _ = Simulation;
+}
 
 /// Prints each validated configuration value to stderr for debugging.
 pub fn print_config() void {

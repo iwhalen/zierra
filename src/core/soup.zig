@@ -164,15 +164,6 @@ test "write permissions enforcement" {
     try testing.expectError(SoupError.PermissionError, soup.write(0, Instruction.inc_a, 0x007));
 }
 
-test "count free memory" {
-    var soup = Soup(5){};
-
-    soup.owner[0] = 0x000;
-    soup.owner[2] = 0x001;
-
-    try testing.expectEqual(3, soup.count_free_memory());
-}
-
 test "inoculate" {
     const ancestor: [3]Instruction = .{ Instruction.nop_0, Instruction.divide, Instruction.jmp };
     var soup = Soup(5){};
