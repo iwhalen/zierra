@@ -8,9 +8,10 @@ connecting it to the next module.
 ## How to Use This Plan
 
 - Checked items describe existing foundations, not a promise that an entire phase is finished.
-  New acceptance criteria remain unchecked until implemented and verified.
-- Module names and signatures describe intended boundaries. Adjust names while learning, but
-  keep their behavior consistent with the contracts below.
+  New acceptance criteria remain unchecked until implemented and verified. Phases 4–7
+  describe future work; their modules and feature flags are not yet wired into execution.
+- Existing names below follow the code. Proposed modules describe intended boundaries;
+  keep their behavior consistent with the contracts below as they are introduced.
 - Establish mutation-free ancestor replication before adding evolution, persistence, or display.
 - Prefer a small working program over infrastructure built in anticipation of later phases.
   Each phase ends with an observable result, which can initially be a test or textual trace.
@@ -26,25 +27,33 @@ connecting it to the next module.
 - Confirm the compiler with `zig version`. If an API differs from the local reference,
   inspect the standard library installed with Zig 0.16.0, located through `zig env`.
 - Ziglings exercises below are concept practice. This checkout includes examples written
-  for older Zig versions; adapt API usage to 0.16.0. In particular, the old async exercises
-  are not a prerequisite for persistence or display.
+  for older Zig versions; adapt API usage to 0.16.0.
 
-### Current Foundations and Remaining Alignment
+### Current Implementation and Next Checkpoint
 
-The repository already contains instruction encoding, soup ownership/allocation helpers,
-CPU state and some handlers, a creature type, and template searches. The following work
-must still be treated as open rather than hidden by an earlier phase's completion mark:
+The deterministic core is implemented and tested:
 
-- `src/config.zon` exists, but the typed configuration/validation module is still planned.
-- Soup currently stores `?Instruction` and reads direct indices. The target below stores
-  raw bytes; changing representation is a separate learning checkpoint.
-- CPU and template helpers already wrap addresses. Circular execution does not require
-  allocations to cross the soup boundary.
-- Creature counters currently use `u16`, and its daughter allocation is not optional.
-  Align these with the lifecycle contract before long simulation runs.
-- CPU execution is incomplete. Existing search tests do not settle every search edge case.
-- The library root does not currently import the core modules. Wire their tests into
-  `zig build test` before treating that command as verification of the simulation.
+- `src/config.zig` validates `src/config.zon` at compile time and exports typed constants.
+- Soup stores `[size]Instruction`, where `Instruction` is an `enum(u8)` with 32 values.
+  Ownership is separate, and CPU execution consumes instructions directly.
+- CPU execution and template searches support the full instruction set. Creatures have
+  optional daughter allocations, persistent organism identities, and saturating counters.
+- Simulation initialization, inoculation, allocation/division/death, scheduling/reaping,
+  and bounded execution are present. Tests include ancestor self-examination and two
+  generations of identical replication, plus equivalent split and uninterrupted runs.
+- `src/root.zig` exports `Simulation` and `ancestor_genome` and imports the simulation
+  into the core test graph.
+
+The executable checkpoint is implemented: `main` prints configuration, initializes static
+simulation storage, inoculates the ancestor at address zero, and calls `run` with a
+20,000-instruction budget.
+Low-level soup validation gaps remain listed in Phase 1; lifecycle validation does not
+mean every soup helper independently provides the same guarantees.
+
+Mutation, genebank/statistics, persistence, and display modules are planned. `GenotypeId`
+formatting and the nullable `parent_genotype` field exist, but births currently set that
+field to null and no genotype registration occurs. Nonzero mutation rates and enabled
+lineage/display flags in the production configuration do not activate these features yet.
 
 ---
 
@@ -53,15 +62,15 @@ must still be treated as open rather than hidden by an earlier phase's completio
 The simulation has these conceptual layers:
 
 ```text
-main / CLI
-    Simulation: lifecycle, counters, scheduling, mutation integration
-        Soup: bytes, ownership, allocation
+main / future CLI
+    Simulation: lifecycle, counters, scheduling
+        Soup: instructions, ownership, allocation
         Creature: CPU state, allocations, identity, counters
-        CPU: fetch, decode, execute, report lifecycle requests
-        Template search + instruction encoding
-    Genebank and statistics
-    Persistence: lineage, summaries, checkpoints
-    Optional display: notcurses
+        CPU: fetch, execute, report ExecResult
+        Template search + instruction definitions
+    Planned: mutation integration, genebank and statistics
+    Planned persistence: lineage, summaries, checkpoints
+    Planned optional display: notcurses
 ```
 
 Keep the simulation single-threaded initially. The CPU does not import the scheduler,
@@ -71,19 +80,21 @@ complete lifecycle operations before another instruction executes.
 ### Compile-Time Shape and Runtime State
 
 Use compile-time parameters for capacities, stack depth, instruction definitions,
-ancestor bytes, and optional features. Keep mutable soup contents, ownership, creatures,
-queues, RNG state, and statistics at runtime.
+ancestor instructions, and optional features. Keep mutable soup contents, ownership,
+creatures, queues, RNG state, and statistics at runtime.
 Runtime mutation does not itself require a host allocator: bounded state can live in
 fixed arrays whose capacities are known at compile time.
 
-Configuration comes from one typed object derived from `src/config.zon` through
-`@import`. Shape and behavior fields may live together; changing the production config
-means rebuilding. Tests can supply small configurations directly.
+Production configuration comes from `src/config.zig`, which imports `src/config.zon`,
+validates a typed configuration, and exports its fields as constants. `Simulation(config)`
+accepts that imported module or a small test configuration. Changing production values
+means rebuilding.
 
-Factory types such as `Soup(size)`, `CPU(stack_depth, search_limit)`, and
-`Simulation(config)` are useful where they clarify storage or behavior. Do not generalize
-every module before its needs are understood. A compile-time limit bounds runtime work;
-it does not require unrolling the loop or evaluating the simulation at compile time.
+The existing factories are `Soup(size)`, `CPU(stack_depth, search_limit)`,
+`Creature(CpuType)`, `Scheduler(CreatureType)`, and `Simulation(config)`.
+Do not generalize every module before its needs are understood. A compile-time limit
+bounds runtime work; it does not require unrolling loops or evaluating the simulation
+at compile time.
 
 Fixed arrays specify layout, not where an instance lives. A full simulation can be large;
 choose its storage deliberately rather than assuming returning it by value or putting
@@ -97,74 +108,77 @@ and its creatures use no host allocator in this phase.
 
 ## Shared Behavioral Contracts
 
-These rules are defined once here and referenced by the phases below.
+These rules describe the implemented core and requirements for its planned extensions.
+The phase checklists identify unfinished work; future contracts are not completion claims.
 
 ### Memory, Addresses, and Arithmetic
 
-- Target soup storage is one `u8` per instruction. Decode uses only bits `0..4`.
-  Copying, mutation output, genotype comparison, hashing, and serialization use canonical
-  values `0x00..0x1f`; upper padding bits do not create distinct genotypes.
-- Every soup cell has an instruction byte, including unowned cells. Initialize the soup
-  with seeded random canonical instructions when starting a simulation. Tiny tests may
-  use a deterministic fill. Ownership, rather than an optional instruction, determines
-  whether memory is allocated.
-- Freeing memory removes ownership and preserves its bytes, as described by the paper.
+- Soup stores one `Instruction` per cell. Its `enum(u8)` values are `0x00..0x1f`;
+  CPU execution consumes the enum directly. Future mutation must preserve valid values,
+  and persistence must validate external opcode values before creating instructions.
+- Every soup cell has an instruction, including unowned cells. Simulation initialization
+  fills the soup with seeded random instructions. Tiny tests may use a deterministic
+  fill. Ownership determines whether memory is allocated.
+- Freeing memory removes ownership and preserves its instructions, as described by the paper.
   Allocating reserves ownership without clearing old code.
 - Read and execute privileges are unrestricted. A creature may write only cells owned
   by its current slot ID: its mother allocation and, before division, its daughter allocation.
   Cosmic rays are a separate privileged operation that can affect any soup cell.
-- CPU fetches, template traversal, and memory dereferences normalize addresses modulo
-  soup length. The soup's low-level read/write APIs require an already valid address;
-  they do not silently implement wrapping.
+- CPU instruction-pointer updates, template traversal, and register-derived memory
+  accesses wrap modulo soup length. CPU fetch reads the current IP directly, so lifecycle
+  initialization and IP updates must keep it valid. Low-level soup reads/writes require
+  an already valid address; they do not implement wrapping.
 - Allocations are linear contiguous ranges and never cross the end of the array.
   An allocation is valid when `len > 0`, `start < soup_size`, and
   `len <= soup_size - start`. Check this before indexing or changing state.
-- Addresses and allocation lengths use `u16`, allowing capacities `1..65535`,
-  not a capacity of 65536. Use `usize` or a wider integer for intermediate range
-  arithmetic when needed, and validate before narrowing. Do not add two `u16`
-  values first and widen an already-overflowed result.
+- Addresses and allocation lengths use `u16`. The current `Soup(size)` guard accepts
+  capacities from 1 through 65534; it also rejects 65535, although that value fits the type.
+  `CPU` applies the same restriction to stack depth. Use `usize` or a wider integer
+  for intermediate range arithmetic when needed, and validate before narrowing.
 - Registers are 16-bit bit patterns. Define addition/subtraction as wrapping modulo
   65536 and shifts as discarding bits beyond the register width. Normalize a register
   modulo soup length when using it as an address. These are different operations:
   register arithmetic must not accidentally wrap modulo soup length.
-- Long-lived instruction/copy counters and timestamps use `u64`; accumulated errors
-  use `u32`. Use a documented checked or saturating policy at their limits rather
-  than allowing Debug builds to trap unexpectedly during an ordinary run.
+- Creature instruction/copy counters use saturating `u64` increments; errors use
+  saturating `u32` increments. `origin_time` and global instruction time use `u64`.
+  Global-time exhaustion returns `InstructionLimitReached` before executing another
+  instruction. Organism identity exhaustion rejects a birth instead of wrapping.
 
 Zierra's fixed-width registers and circular execution are explicit project conventions.
 The paper's C `int` register fields do not by themselves establish 16-bit arithmetic.
 
 ### Ownership and Allocation Failure
 
-Use an ownership-aware allocation operation, conceptually
-`allocate(request_size, requester_id) -> Allocation or allocation error`.
-Use one consistent failure vocabulary throughout the modules; the existing soup names
-include `PermissionError`, `NoFreeSoup`, and `InvalidAllocation`.
+`Soup.allocate(request_size, requester)` assigns ownership to a slot and returns an
+`Allocation` or `SoupError`. Existing soup errors are `PermissionError`, `NoFreeSoup`,
+and `InvalidAllocation`.
 
 - Reject zero-size and oversized requests. Search all valid runs, including one ending
   at the final cell and one occupying the entire soup.
 - Insufficient contiguous space is a normal virtual-machine failure, even when total
   free memory is sufficient. The initial allocator uses deterministic first-fit scans.
-- Validate the entire range before inoculation, freeing, or ownership transfer.
-  Failed operations leave bytes, ownership, counters, and queues unchanged.
-- Free/transfer operations must verify the expected owner, so a stale handle cannot
-  release another creature's memory. Only the lifecycle manager retains live handles.
+- Lifecycle methods validate ranges before inoculation, death, or division.
+  Rejected lifecycle requests preserve allocations, slots, identities, and occupied
+  memory; their VM error flag, error count, and possible reaper movement still apply.
+- `Simulation.kill` validates the live creature pointer and expected owners before
+  freeing; `divide` checks daughter ownership before transfer. `Soup.free` has no
+  expected-owner parameter, and its range checks are incomplete. Keep live handles
+  under lifecycle management; low-level validation work remains open in Phase 1.
 - On division, ownership changes from the mother's slot to the daughter's slot.
   On death, release both the mother allocation and any gestating daughter allocation.
 
 ### Identity, Storage, and Queue Lifetimes
 
-`CreatureId` is a `u16` slot index used by soup ownership and in-memory lookup.
-A separate monotonically increasing `OrganismId: u64` identifies a birth for lineage
-and saved output. Slot reuse must never merge two organisms' histories.
+`slot_id: u16` is the reusable index used by soup ownership and in-memory lookup.
+A separate monotonically increasing `organism_id: u64` identifies a birth for future
+lineage and saved output. Slot reuse must never merge two organisms' histories.
 
-Start with a fixed creature pool embedded in the simulation, indexed directly by slot ID,
-with occupancy metadata and a fixed-capacity free-slot list. Use soup capacity as the
-initial slot capacity: every live creature owns at least one soup cell. This reserves
-maximum creature storage upfront in exchange for avoiding per-birth host allocation.
-Initialize a slot's creature only when claiming it; never inspect inactive creature data.
-Initialize the free-slot stack so fresh slots are acquired in ascending index order;
-push released slots onto the top for immediate reuse. Preserve this order across save/load.
+The simulation embeds `[config.soup_size]?CreatureType`; null denotes a free slot.
+`free_slots` is an `ArrayList(u16)` backed by `free_slots_buffer`, initialized with
+`initBuffer` and operated without a host allocator. Every live creature owns at least
+one soup cell, so soup capacity bounds the number of simultaneous creatures.
+Fresh slots are acquired in ascending order; released slots are pushed for immediate
+reuse. Preserve the exact free-slot order across save/load, and never read null payloads.
 
 An `ArrayList(Creature)` that reallocates is incompatible with intrusive queue pointers.
 Do not compact or swap-remove live creatures if their indices identify ownership.
@@ -178,7 +192,7 @@ A cached display selection must validate the organism identity when a slot is re
 
 ### CPU Outcomes, Flags, and Counters
 
-The execution outcome is a tagged union with one active variant:
+`ExecResult` is the existing tagged union with one active variant:
 
 | Outcome | Meaning |
 | --- | --- |
@@ -186,17 +200,21 @@ The execution outcome is a tagged union with one active variant:
 | `mal_request(size)` | Simulation must allocate a daughter block |
 | `divide` | Payload-free request; simulation must validate and complete division for the executing creature |
 | `error_condition` | Expected VM fault; record one error |
-| `hard_instruction_success` | Apply the configured reaper reward |
+| `hard_instruction_success` | Apply the scheduler's hard-instruction reward |
 
-`step` fetches, decodes, dispatches, and increments the creature's executed counter once.
-`execute` owns every instruction-pointer update, including failures and requests.
-`step` must not increment IP again.
+`CPU.step` fetches an `Instruction`, dispatches through `execute`, and increments the
+creature's executed counter once. Execution handlers own every instruction-pointer
+update, including failures and requests. `step` must not increment IP again.
 
-The simulation increments the global instruction counter once, then completes any request
-before the next CPU step. Birth/replication events use this updated instruction time;
-inoculation uses time zero. It then performs due mutation/observation work.
-A failed allocation or division uses the same error-accounting path as a CPU fault,
-exactly once.
+`Simulation.step` increments global instruction time once, dispatches `ExecResult`,
+then consumes one unit of `slice_remaining`. At slice end it advances the slicer and
+reaps while `occupied_cells > occupied_limit`. A failed allocation or division uses
+the same error-accounting path as a CPU fault, exactly once.
+
+Phase 4 adds cosmic mutation after outcome handling and before slice-end work;
+observations in later phases see the completed instruction and any resulting reaping.
+Births during execution use the updated instruction time. Inoculation uses the current
+time, which is zero for the initial ancestor.
 
 Clear `fl` at the beginning of each instruction; failures set it to 1. Successful
 lifecycle completion leaves it at 0. Reading genebank/display state must not change it.
@@ -217,8 +235,7 @@ Template extraction and complementary search have separate limits and failure me
 - The operand begins at the cell after an addressing instruction. It is the consecutive
   run of `nop_0`/`nop_1` cells there.
 - Extraction traverses at most one soup length. An all-NOP soup must terminate with an
-  invalid-operand outcome, not loop forever. An overlong/invalid operand is distinct
-  from an empty operand.
+  invalid-operand result. An invalid operand is distinct from an empty operand.
 - Initially no extra configurable template-length cap is needed. If one is added later,
   exceeding it must not silently truncate the operand or turn it into an empty template.
   In particular, `search_limit / 2` is not a template-length definition.
@@ -237,12 +254,14 @@ Template extraction and complementary search have separate limits and failure me
 - A successful search returns the address immediately after the matched template.
   A failed instruction advances past its own full operand, sets `fl`, and reports
   one execution error.
-- Keep “no operand,” “invalid operand,” and “valid operand with no match” distinguishable
-  in the CPU-facing extraction result. A nullable search result can still mean no match.
+- `pattern_length_at` returns zero for an empty operand, a positive length for a valid
+  operand, and null for an invalid operand. Search helpers return null for no match;
+  CPU handlers distinguish the empty case before treating a search as failed.
 
 ### Mutation Units and Reproducibility
 
-Retain the existing configuration names, but define their units before adding RNG calls:
+The fields and derived-interval validation exist; mutation execution does not.
+Phase 4 retains the following planned Zierra units:
 
 | Field | Meaning |
 | --- | --- |
@@ -252,21 +271,23 @@ Retain the existing configuration names, but define their units before adding RN
 
 For Zierra's initial model, each eligible opportunity is an independent trial:
 probability `1 / cosmic_rate` after an executed instruction and
-`1 / copy_error_rate` for a permitted copy. Flaws use an interval of
-`max(1, ceil(copy_error_rate * flaw_rate))` eligible arithmetic executions.
-Disable flaws when either input is zero. A value of 1 means every opportunity.
+`1 / copy_error_rate` for a permitted copy. Flaws use probability `1 / interval`
+per eligible arithmetic/bit execution, where
+`interval = max(1, ceil(copy_error_rate * flaw_rate))`.
+Disable flaws when either input is zero. An interval of 1 means every opportunity.
 Thus `flaw_rate = 1.5` is a multiplier, not a 2/3 probability per instruction.
 
 This independent-trial model avoids fixed periodic events. The paper describes randomized
 intervals and generation-relative rates; these project units are a simplification, not
 an exact reproduction of its experimental parameterization.
 
-Use explicit, separate seeded streams for soup initialization, cosmic mutations, copy
-mutations, and flaws. Specify their seed derivation and call order when implementing
-Phase 4. Rendering, logging, and statistics must not consume simulation randomness.
+Soup initialization currently uses a local `std.Random.Xoshiro256` seeded directly
+from `rng_seed`, then discards it. Keep that initialization independent of future
+cosmic, copy, and flaw streams. Add those streams in Phase 4, recording their seed
+derivation and call order. Rendering, logging, and statistics must not consume them.
 
-Keep RNG state at a stable address, and retain all streams' full state for save/load.
-A seed alone cannot resume a run midway through its random sequence.
+Keep future mutation RNG state at a stable address and retain its full state for
+save/load. A seed alone cannot resume a run midway through its random sequence.
 
 ---
 
@@ -276,11 +297,11 @@ A seed alone cannot resume a run midway through its random sequence.
 
 Goal: establish configuration, instruction representation, soup storage, and CPU state.
 
-#### Configuration (`src/config.zon`, `src/core/config.zig`)
+#### Configuration (`src/config.zon`, `src/config.zig`)
 
 - [x] A project-wide `src/config.zon` exists.
 - [x] Add a typed config and compile-time validation.
-- [x] Make each concrete module receive only the configuration it needs.
+- [x] Specialize factories from compile-time configuration, including small test configs.
 - [x] Verify importing the config and rebuilding selects the intended concrete types.
 
 Current production values, to keep distinct from experimental/test configurations:
@@ -301,33 +322,36 @@ Current production values, to keep distinct from experimental/test configuration
 | `output_dir` | `[]const u8` | "output" |
 | `rng_seed` | `u64` | 8675309 |
 
-Validate positive soup size and stack depth; require finite floats, a reaper threshold
+Validation requires positive soup size and stack depth, finite floats, a reaper threshold
 strictly between 0 and 1, nonnegative flaw multiplier, and nonnegative slicer power.
-Check derived mutation intervals before converting floats to integers. Define zero
-snapshot interval as disabled. Search limit zero is valid and causes searches to fail.
+It also checks that the derived flaw interval is finite and fits `u32`.
+The soup/CPU factories impose the additional upper bounds documented above.
+Search limit zero is valid and causes searches to fail. Phase 5 will interpret zero
+snapshot interval as disabled; snapshot scheduling is not implemented yet.
 
 These are Zierra defaults. Do not test that every field matches a universal “original
 Tierra default”; several are project choices or values from one experiment.
 
 #### Instruction Set (`src/core/instruction.zig`)
 
-- [x] All 32 opcodes are represented by an enum.
-- [x] Encoding/decoding helpers exist and decoding ignores upper storage bits.
-- [x] Check opcode numbers and register effects against Appendix B.
+- [x] All 32 opcodes are represented by `Instruction`, an `enum(u8)`.
+- [x] NOP recognition and complementary-NOP helpers exist.
+- [x] Opcode ordering matches Appendix B; CPU tests cover the specified register effects.
 
 #### Soup / Memory (`src/core/soup.zig`)
 
 - [x] Compile-time `Soup(size)`, ownership, allocation, and inoculation foundations exist.
-- [x] Move from optional instructions to `[size]u8` memory plus
-  `[size]?CreatureId` ownership.
-- [x] Implement the shared memory and failure contracts, including expected-owner checks.
-- [x] Accept the documented maximum capacity of 65535; reject zero.
-- [x] Keep the byte store independent of CPU decoding and queue management.
+- [x] Store `[size]Instruction` memory plus `[size]?u16` ownership.
+- [x] Enforce write ownership and find exact-fit first-fit allocations, including at the end.
+- [x] Reject zero capacity; current accepted capacities are 1 through 65534.
+- [x] Keep soup independent of CPU execution and queue management.
+- [ ] Complete low-level `free`/`inoculate` range validation and boundary tests.
+  Their current checks do not cover every empty, invalid-start, or over-end range.
 
-Use targeted tests for exact-fit allocation, the last free cell, zero requests, fragmented
-space, range-end overflow, permission failures, and inoculation encountering an occupied
-cell late in its range. Verify failed operations are atomic and freeing preserves code.
-Test wrapping in address helpers rather than requiring low-level reads to wrap.
+Retain exact-fit, permission, and allocation/free tests. Add direct low-level tests for
+invalid ranges and unchanged state on failure, using wider range arithmetic before
+indexing. Simulation-level tests already cover rejected lifecycle requests; they do not
+replace tests of these helpers. Test wrapping in address helpers rather than soup reads.
 
 #### CPU State (`src/core/cpu.zig`)
 
@@ -365,32 +389,22 @@ Goal: run one creature deterministically, without lifecycle creation or mutation
 
 #### CPU Execution (`src/core/cpu.zig`)
 
-Implement groups in this order: plain arithmetic/register operations, stack operations,
-conditional skips, jumps/calls/returns, addressing, copying, then lifecycle requests.
-Keep mutation hooks disabled until Phase 4.
+Arithmetic/register operations, stack operations, conditional skips, jumps/calls/returns,
+addressing, copying, and lifecycle requests are implemented and tested. Mutation hooks
+are future work in Phase 4.
 
 ```text
-step:
-    clear this instruction's error flag
-    fetch a valid soup byte at the normalized instruction pointer
-    decode and execute one instruction
-    increment the creature's executed counter once
+CPU.step:
+    fetch an Instruction at the current valid instruction pointer
+    execute it, clearing the prior flag and updating IP in its handler
+    saturating-increment the creature's executed counter once
     return its outcome
-
-simulation's later instruction loop:
-    step the current creature
-    increment global executed count once
-    finish any lifecycle request or error accounting
-    apply due mutations
-    finish scheduling/reaping if the slice ended
-    record observations at this completed boundary
 ```
 
-There is no empty-cell fetch in the target byte soup. While the old optional representation
-is being retired, a null fetch can be treated as a VM fault that advances IP once; remove
-that transitional branch and its tests when every cell has a byte.
+Every cell contains an instruction, including unowned cells. There is no empty-cell
+fetch branch. Simulation outcome handling and slice boundaries follow the shared contract.
 
-| Instruction group | Behavior to establish |
+| Instruction group | Established behavior |
 | --- | --- |
 | Plain arithmetic/register ops | Apply Appendix B's effect using defined 16-bit arithmetic; advance IP once |
 | Stack ops | On failure, preserve the destination/stack state, advance IP, report an error |
@@ -425,15 +439,14 @@ allocation succeeds.
 
 #### Creature (`src/core/creature.zig`)
 
-- Embed the specialized CPU directly.
-- Store slot ID, organism identity, mother allocation, optional daughter allocation,
-  birth time, and the counters described in the shared contracts.
-- Keep current genotype identity separate from the parent's genotype identity when
-  the genebank is introduced.
-- Avoid an import cycle between CPU and creature. Pass a narrow execution context or
-  use generic parameters where appropriate; do not duplicate mutable CPU state.
+- The specialized CPU is embedded directly alongside `slot_id`, `organism_id`,
+  `mother_alloc`, optional `daughter_alloc`, `origin_time`, and the shared counters.
+- `parent_genotype: ?GenotypeId` is present but not populated by lifecycle methods.
+  Phase 4 adds the creature's own birth genotype separately.
+- Generic execution parameters connect CPU and creature without duplicating CPU state
+  or importing the simulation into the CPU.
 
-Tests should cover overflow/underflow in registers, IP movement for every instruction
+Tests cover overflow/underflow in registers, IP movement for every instruction
 group, successful/failing copy permissions, unchanged copy address registers, flags,
 template skips, `adr*` updating `cx`, call failure atomicity, and single counting
 on fault paths.
@@ -464,10 +477,11 @@ The queues depend on the stable-storage contract above.
 
 The 80-instruction `0080aaa` genome is transcribed as `[80]Instruction`.
 
-- [ ] Verify the transcription against Appendix C and its fit in the selected soup.
-- [ ] Trace its self-examination: at base 0, `adrb` finds match-end 4,
-`sub_ac` obtains base 0, `adrf` finds match-end 79, and `inc_a`/`sub_ab`
-calculate size 80. Then trace allocation, copying, and division.
+- [x] The transcription matches Appendix C and fits the production soup.
+- [x] `src/root.zig` exports `ancestor_genome` for use by the executable.
+- [x] Tests trace its self-examination: at base 0, `adrb` finds match-end 4,
+  `sub_ac` obtains base 0, `adrf` finds match-end 79, and `inc_a`/`sub_ab`
+  calculate size 80, then allocation, copying, and division produce two generations.
 
 #### Simulation (`src/sim/simulation.zig`)
 
@@ -476,56 +490,56 @@ instruction stepping, slice-boundary reaping, and bounded `run` entry point are
 implemented. Creature identities and widened counters are present, and `src/root.zig`
 imports the simulation into the test graph.
 
-The implementation uses `[N]?CreatureType` for occupancy and an `ArrayList(u16)` backed
-by an inline buffer for free slots. These replace the proposed separate active flags,
-free-count field, and slot helpers; no host allocator is needed. Soup initialization
-uses a local seeded RNG, so there is no stored Phase 3 RNG state to compare.
-Keep the simulation in its final storage while buffer and queue pointers refer into it.
-Genebank, persistence, display, and mutation integration belong to later phases.
+The fixed pool, inline free-slot buffer, and local initialization RNG follow the shared
+storage contract. Keep the simulation in its final storage while buffer and queue
+pointers refer into it. Genebank, persistence, display, and mutation integration belong
+to later phases.
 
-Remaining implementation work:
+Executable checkpoint:
 
-- [ ] Use saturating increments for creature execution/copy counters in
-      `src/core/cpu.zig`; they currently use ordinary addition. Error counts already
-      saturate in the scheduler.
-- [ ] In `main`, inoculate the ancestor at address zero after initialization and run
-      a bounded mutation-free simulation. Static production storage is already present.
+- [x] In `main`, inoculate the ancestor at address zero after initialization and run
+      a bounded mutation-free simulation using the existing `init`, `inoculate`, and
+      `run` entry points.
+      Static production storage is already present; full CLI parsing belongs to Phase 7.
 
-Remaining verification:
+Verified lifecycle behavior:
 
-Simulation tests currently cover `valid_allocation` only. Add small, hand-checkable
-lifecycle tests that instantiate the factory and exercise its methods before running
-ancestor replication. Compare initialized fields and live creature payloads, never raw
-struct bytes, unused stack entries, or inactive payloads. For slot/identity exhaustion,
-construct the boundary state directly in the test.
+Tests instantiate small simulations and compare initialized fields and live creature
+payloads, not raw struct bytes or unused stack entries. Slot/identity exhaustion tests
+construct boundary states directly.
 
-- [ ] Empty initialization: canonical soup bytes, no owners, all slots free, empty queues,
+- [x] Empty initialization: valid instructions, no owners, all slots free, empty queues,
       zero counters, next organism ID zero, and the expected floored occupancy limit.
-- [ ] Equal configs/seeds produce identical initialized instructions.
-- [ ] Slot acquisition uses ascending fresh IDs; released slots are reused first;
+- [x] Equal configs/seeds produce identical initialized instructions.
+- [x] Slot acquisition uses ascending fresh IDs; released slots are reused first;
       reused slots receive new organism IDs.
-- [ ] Inoculation initializes every live field and both queues. Empty, out-of-range,
+- [x] Inoculation initializes every live field and both queues. Empty, out-of-range,
       occupied, slot-exhausted, and identity-exhausted attempts leave the full state intact.
-- [ ] Successful allocation reserves cells and rewards once; duplicate, invalid, and
+- [x] Successful allocation reserves cells and rewards once; duplicate, invalid, and
       fragmented requests preserve lifecycle state and record exactly one VM error.
-- [ ] Division transfers ownership, creates a zeroed child at the incremented birth time,
+- [x] Division transfers ownership, resets the child's CPU/counters at the updated time,
       preserves the mother's remaining budget, and does not change occupied cells.
       Missing, invalid, overlapping, or wrongly owned daughter handles leave lifecycle
       state intact.
-- [ ] Death releases mother and gestating daughter memory, preserves code, unlinks both
+- [x] Death releases mother and gestating daughter memory, preserves code, unlinks both
       queues, and permits slot reuse. Invalid ownership changes nothing.
-- [ ] Reaping uses a strict greater-than comparison, removes multiple victims when
+- [x] Reaping uses a strict greater-than comparison, removes multiple victims when
       required, and handles singleton extinction and removal of the selected next creature.
-- [ ] CPU faults and failed lifecycle requests increment errors once; every executed
+- [x] CPU faults and failed lifecycle requests increment errors once; every executed
       instruction increments global time once. Global-time exhaustion changes nothing.
-- [ ] Slice budgets clamp to at least 1 and at most the maximum `u64`, including
+- [x] Creature execution/copy counters and accumulated errors saturate without stopping
+      instruction execution or global time.
+- [x] Slice budgets clamp to at least 1 and at most the maximum `u64`, including
       powers too large to represent as a finite `f64`.
-- [ ] Empty `step`/`run` execute nothing; zero-budget runs change nothing. Compare
-      `run(A + B)` with `run(A)` followed by `run(B)`, including partial slices and a
+- [x] Empty `step`/`run` execute nothing; zero-budget runs change nothing.
+      `run(A + B)` matches `run(A)` followed by `run(B)`, including partial slices and a
       budget ending exactly at a reaping boundary.
-- [ ] With mutations absent, the ancestor produces an identical 80-byte daughter, then
-      that daughter reproduces. Compare ownership, CPU initialization, and queue membership
-      as well as genome bytes.
+- [x] With mutations absent, the ancestor produces an identical 80-instruction daughter, then
+      that daughter reproduces. Tests compare ownership, CPU initialization, and queue
+      membership as well as genome instructions.
+
+Exit criterion met: core tests pass and `zig build run` completes bounded ancestor
+execution. Preserve both when wiring in Phase 4 features.
 
 Useful Ziglings:
 [004_arrays](../ziglings/exercises/004_arrays.zig),
@@ -535,155 +549,139 @@ Useful Ziglings:
 [066_comptime](../ziglings/exercises/066_comptime.zig), and
 [102_testing](../ziglings/exercises/102_testing.zig).
 
-### Phase 4: Evolution & Lineage
+### Phase 4: Evolution and Lineage
 
-Goal: introduce mutation, genotype tracking, statistics, and ordered organism events.
+Goal: extend the deterministic core with mutation, then genotype tracking/statistics,
+then ordered organism events. Complete the Phase 3 executable checkpoint first.
+The module paths in this phase are proposed additions.
 
 #### Mutation (`src/sim/mutation.zig`)
 
-Add one mutation class at a time, retaining a fully disabled configuration.
+Add one mutation class at a time, retaining the fully disabled deterministic path.
 
-- Cosmic events flip one random bit in positions `0..4` at a random soup address,
-  regardless of ownership, after instruction completion.
-- Copy mutation applies only after destination permission is known to succeed and
-  before storing the copied byte. The source byte stays unchanged unless source
-  and destination are the same address.
-- Initially apply execution flaws only to arithmetic/bit operations. For arithmetic,
-  perturb the result by ±1 with defined 16-bit wrapping. For `or1`, perturb the
-  chosen bit (no flip or bit 1 instead of bit 0); for `shl`, use shift 0 or 2
-  instead of 1. Keep moves, stack, jumps, and lifecycle deterministic initially.
-  This restricted scope is a documented simplification of the paper.
-- Pass a mutation context through a narrow CPU interface; do not make CPU execution
-  import or call the simulation.
-- Use `std.Random.Xoshiro256` or another explicitly recorded seedable generator,
-  with the separate stream/lifetime contract above.
+- [ ] Add separate seeded cosmic, copy, and flaw streams in stable simulation storage,
+  following the shared units and reproducibility contract. Keep soup initialization
+  unchanged and record the mutation streams' seed derivation and draw order.
+- [ ] Add cosmic events at the shared post-outcome boundary. Flip one random bit in
+  positions `0..4` at any soup address, regardless of ownership, and store a valid
+  `Instruction` again.
+- [ ] Add copy mutation within `mov_iab`, after destination permission is established
+  and before the single write. Denied writes consume no copy randomness and do not
+  count as copies. Preserve the source unless it is also the destination.
+- [ ] Add execution flaws through a narrow CPU mutation context. Initially restrict
+  them to arithmetic/bit operations: perturb arithmetic results by ±1 with wrapping;
+  for `or1`, flip no bit or bit 1; for `shl`, shift by 0 or 2 instead of 1.
+  This restricted scope is a Zierra simplification of the paper.
 
-Verify disabled rates, certain events at interval 1, single-bit mutation, canonical
-bytes, denied-copy behavior, and deterministic replay. Use injected random decisions
-to force edge cases. Do not write probabilistic tests that sometimes fail because no
-mutation happened.
+Keep `ExecResult`, IP updates, error accounting, and slice scheduling intact. The CPU
+must not import the simulation. Disabled mutation rates must consume no mutation draws.
+Verify forced events, interval 1, disabled rates, valid enum values, denied copies,
+fixed-seed replay, and equivalence of split and uninterrupted instruction budgets.
 
-#### Genebank & Statistics (`src/sim/genebank.zig`)
+#### Genebank and Statistics (`src/sim/genebank.zig`)
 
-Unlike the live population, historical genotype storage is not bounded by soup capacity:
-new genotypes can accumulate after earlier organisms die. Introduce an explicit host
-allocator and cleanup lifetime here if using growable storage. A fixed-storage alternative
-requires a documented history limit and an explicit exhaustion or retention policy.
+- [ ] Register genomes at successful inoculation and division, using owned copies of
+  the allocation's instructions. Deduplicate by instruction content; if using hashes,
+  compare content after a hash match. Register births before the later cosmic event.
+- [ ] Reuse `GenotypeId` and its size/three-letter representation. Allocate base-26
+  labels per size class (`0080aaa`, `0080aab`, ...); report exhaustion after `zzz`.
+  Store the creature's birth genotype separately from `parent_genotype`, which comes
+  from the reproducing parent's birth genotype. The initial ancestor has no parent.
+- [ ] Track live census by birth genotype, origin time, and actual successful
+  replications. Keep first-replication measurements optional until replication occurs;
+  use the existing instruction/error/copy counters. Set `breeds_true` when offspring
+  instructions equal the parent's stored birth genome.
+- [ ] Integrate registration and census updates into the existing lifecycle methods.
+  Keep census totals consistent through division, death, and slot reuse; sort reported
+  census entries by genotype label for deterministic output.
 
-A creature records its birth genotype. Cosmic mutation may change its living bytes
-without changing that historical identity; census counts are initially by birth
-genotype. Label live-byte inspection separately.
+Birth genotype is historical identity: later cosmic changes to living code do not
+reclassify it. The same genotype can arise from different parents; actual organism
+parentage belongs in lineage events. Naming each birth genotype immediately is a Zierra
+simplification of the paper's replication-qualified genebank policy.
 
-- Register canonical genomes at birth. Own a copy of the genome: a slice into soup
-  will change, and a hash alone can collide. Compare bytes after a hash match.
-- Maintain a current genotype ID as well as optional parent genotype ID.
-  Derive parentage from the parent's birth genotype under this initial policy.
-- Start with size + three-letter base-26 labels (`0080aaa`, `0080aab`, ...).
-  Define exhaustion after `zzz`: return an explicit naming error, never silently wrap.
-- A known genotype can arise from multiple parent genotypes. Keep a first-discovery
-  parent on the record if useful; lineage events retain the actual organism parent.
-- Record origin time, live population, replication counts, and instruction/error/copy
-  totals or interval deltas as the corresponding measurements become available.
-- At birth, first-replication metrics are unknown and must be optional. Populate them
-  on actual replication, not with fabricated zeros during registration.
-- Mark `breeds_true` when a completed replication produces bytes equal to the parent's
-  stored birth genome. Track replication count separately. Naming every birth
-  genotype immediately is a Zierra simplification: the paper describes one genebank
-  implementation that waits for two replications and an identical offspring.
-- Keep error counters, total population, and genotype census consistent on birth/death.
-  Define deterministic census tie-breaking, for example by genotype label.
-
-Test registration, high-bit canonicalization, distinct genomes of equal size, known
-genomes with different parents, label exhaustion, breeds-true detection, and counters.
+Historical genomes can outlive creatures and accumulate beyond the fixed pool's capacity.
+Introduce an explicit host allocator and cleanup lifetime for the genebank. Surface
+allocation failures as host errors, preserving lifecycle consistency; do not turn them
+into VM faults. Test deduplication, distinct equal-size genomes, label exhaustion,
+different parents, breeds-true detection, census updates, and failure cleanup.
 
 #### Lineage (`src/persistence/lineage.zig`)
 
-Start with synchronous buffered JSONL, not a lock-free queue.
+- [ ] Write synchronous buffered JSONL under the configured output directory and run ID.
+  Record initial birth, later parent/child births, first successful replication, and
+  reaper deaths. Use `organism_id` for organism identity, alongside genotype IDs,
+  global instruction time, and an increasing event sequence.
+- [ ] Capture event data while the relevant creature is live, before death releases
+  its slot. Preserve lifecycle order for events sharing an instruction time.
+  VM faults continue to affect the reaper; they do not introduce a new death policy.
+- [ ] Write run metadata with the active configuration, RNG algorithm/seed derivation,
+  Zig version, and output format version. Propagate write/flush errors and clean up
+  resources on both normal shutdown and failure.
+- [ ] Honor `lineage_enabled`: disabling tracing opens no lineage file and changes
+  neither simulation randomness nor genebank/census behavior.
 
-- Output one ordered event per line in `output/<run_id>/lineage.jsonl`.
-- Record ancestor birth with no parent, later births with parent and child
-  `OrganismId`, deaths, and the parent's first successful replication.
-- Include genotype IDs, global instruction time, and an event sequence number so
-  multiple events at the same instruction retain a defined order.
-- Start with death cause `reaped`. An `error_limit` death policy requires an
-  explicit future configuration/behavior decision and is not implied by VM faults.
-- Use error-returning `record` and `flush`; surface I/O failures. Flush buffered output
-  on successful shutdown, and ensure cleanup happens on error.
-- Record the active config, RNG algorithm/seed scheme, Zig version, and simulation
-  format/version in run metadata so an experiment can be interpreted later.
-- A disabled lineage feature should not open its files or affect simulation randomness.
+Exit criterion: a repeatable headless run exercises mutation and reports consistent
+genotypes, census, and ordered lineage. Forced decisions test individual mutation rules;
+tests must not require evolution to produce a particular population shape.
 
-If profiling later justifies a writer thread, send owned immutable events through a
-bounded queue. Define blocking/backpressure, writer-failure propagation, buffer ownership,
-and shutdown/drain/join before adding it. “Non-blocking” cannot also promise to block
-when full. Lock-free algorithms are an optional advanced exercise.
-
-Learning checkpoint: distinguish organism identity from reusable storage slots and
-explain why a genebank must own bytes instead of borrowing mutable soup memory.
+Learning checkpoint: distinguish slot identity, organism identity, and birth genotype;
+explain why the genebank owns instructions instead of borrowing mutable soup memory.
 
 Useful Ziglings:
 [055_unions](../ziglings/exercises/055_unions.zig),
 [096_memory_allocation](../ziglings/exercises/096_memory_allocation.zig),
+[097_bit_manipulation](../ziglings/exercises/097_bit_manipulation.zig),
 [099_formatting](../ziglings/exercises/099_formatting.zig), and
 [106_files](../ziglings/exercises/106_files.zig).
-For optional later threading:
-[104_threading](../ziglings/exercises/104_threading.zig) and
-[105_threading2](../ziglings/exercises/105_threading2.zig).
 
-### Phase 5: Snapshots & Persistence
+### Phase 5: Summaries and Checkpoints
 
-Goal: observe a run and resume it deterministically. Summary snapshots and resumable
-checkpoints are different artifacts with different data requirements.
+Goal: observe Phase 4 runs and resume them deterministically. Summary snapshots describe
+a run; resumable checkpoints preserve its execution state. Both modules below are planned.
 
 #### Periodic Summaries (`src/persistence/snapshot.zig`)
 
-- At completed instruction boundaries, capture summaries every
-  `config.snapshot_interval` global instructions; zero disables.
-- Record population, occupied/free memory, genotype census, size histogram, and time.
-  Define ordering so identical simulation states produce identical summary content.
-- The initial writer is synchronous and buffered. Snapshot construction owns its
-  variable-length data and can fail allocation; expose allocator and cleanup lifetimes.
-- If later sending summaries to a writer thread, deep-copy slices. A `*const Simulation`
-  does not prevent another thread from mutating the same underlying memory.
-- Write metadata separately so summaries can refer to the run/config version.
+- [ ] Capture summaries every `config.snapshot_interval` global instructions, after
+  outcome handling, cosmic mutation, and any slice-boundary reaping. Zero disables.
+  Schedule from global time so splitting a run budget does not change capture boundaries.
+- [ ] Report time, population, occupied/free memory, birth-genotype census, and size
+  histogram in deterministic order. Refer to the run metadata introduced in Phase 4.
+- [ ] Write synchronously with buffering. Keep observation read-only and independent
+  of RNG; make any retained data's allocation and cleanup lifetime explicit.
+  Surface output failures and flush on shutdown.
 
-Test exact snapshot boundaries, disabled output, census agreement, and error cleanup.
+Verify exact boundaries, disabled summaries, census agreement, split-run equivalence,
+and error cleanup before adding resumable state.
 
 #### Save/Load (`src/persistence/state.zig`)
 
-Design a versioned data-only checkpoint schema before implementing serialization.
-Do not serialize raw pointers, intrusive nodes, allocator internals, file handles, or
-the entire in-memory simulation struct.
+- [ ] Define a versioned data-only format with configuration compatibility information.
+  Capture at completed instruction boundaries, including boundaries partway through
+  a creature's slice.
+- [ ] Preserve all soup instructions, including unowned code; ownership; live creature
+  slots, CPU state, allocations, identities, counters, and birth metadata.
+  Only initialized stack entries are data.
+- [ ] Preserve slicer order/current position and `slice_remaining`, reaper order,
+  exact `free_slots.items` order, next organism identity, full mutation RNG states,
+  genebank/statistics, and event/observation sequencing state.
+- [ ] Load into final storage and rebuild queue links, buffer references, and lookup
+  structures. Validate opcode values, ranges, owners, identities, queue membership,
+  stack bounds, and configuration compatibility before exposing the instance.
+  Release partially constructed state on failure.
+- [ ] Write through a temporary file and replace the checkpoint after successful
+  write/flush. Resume into a new output run whose metadata identifies the checkpoint.
 
-Capture at least:
+Do not serialize raw struct memory, pointers, intrusive nodes, allocator internals,
+or file handles. A seed alone cannot restore the mutation streams' current states.
 
-- Config compatibility information, schema version, and instruction boundary/order.
-- All soup bytes, including unowned code, plus ownership/allocation state.
-- Creature slots, organism IDs, CPU registers, initialized stack portion, allocations,
-  birth genotype, counters, and timestamps.
-- Slicer order/cursor and remaining current-slice budget; reaper order.
-- Full RNG stream states and any pending mutation schedule state.
-- Genebank-owned genomes, labels/naming counters, census, replication metadata, and stats.
-- Next organism ID, reusable slots, event sequence, and next observation boundaries.
+Exit criterion: run A+B uninterrupted and compare its logical state with run A,
+save/load, then B, including a partial slice and enabled mutations. Compare soup,
+ownership, creature/queue state, free-slot order, identities, genebank, counters, and
+RNG states. Reject truncated files, invalid state, unsupported versions, and incompatible
+configurations without exposing a partial load.
 
-Rebuild queue links and lookup structures when loading into final storage. Validate
-ranges, unique identities, owners, queue membership, stack pointers, and config
-compatibility before exposing the loaded instance. Free partially constructed state
-on any parse/allocation/validation failure.
-
-Use Zig 0.16.0's `std.json.Stringify` and `std.json.parseFromSlice`, checking actual
-signatures in the installed library. Own or copy parsed data before releasing its
-parse arena. Serialize only initialized stack entries; `undefined` storage is not
-checkpoint data.
-
-Write to a temporary file and replace the checkpoint only after a successful write/flush.
-Initially resume into a new output run with metadata pointing to its parent checkpoint,
-rather than appending potentially duplicated events to an old lineage file.
-
-Exit criterion: run A+B uninterrupted and compare it with run A, save/load, then B.
-Compare soup, ownership, CPU/queue state, genotypes, counters, and RNG state; matching
-population alone is insufficient. Also reject truncated files, unsupported versions,
-and incompatible fixed storage shapes.
+Learning checkpoint: explain why a population count or original seed cannot resume a run.
 
 Useful Ziglings:
 [029_errdefer](../ziglings/exercises/029_errdefer.zig),
@@ -693,39 +691,28 @@ Useful Ziglings:
 
 ### Phase 6: Visualization
 
-Goal: add optional notcurses views while preserving headless simulation behavior.
+Goal: display Phase 4 statistics and live soup state while preserving the headless run.
+Display modules and notcurses integration are planned additions.
 
-#### Build and C Wrapper (`build.zig`, `src/display/notcurses.zig`)
+- [ ] Wire `display_enabled` into build/import decisions for display artifacts, using
+  Zig 0.16.0's C interop and linking APIs. Headless builds and core tests must work
+  without notcurses. Document its system dependency when adding it.
+- [ ] Start with a soup map and basic statistics, then add creature inspection and a
+  size histogram. Render read-only state at a throttled rate between completed
+  instructions/batches on the simulation thread.
+- [ ] Add quit, pause/resume, selection, and single-step input. Single-step completes
+  one `Simulation.step`, including its lifecycle and reaping work. Pausing must not
+  advance simulation counters or RNG.
+- [ ] Handle resizing and extinction; validate selections against both `slot_id` and
+  `organism_id` when slots are recycled. Clean up terminal resources on all exit paths.
+- [ ] Add `zig build test-display` when display-specific checks exist. Keep view-mapping
+  tests independent of terminal initialization; exercise terminal lifecycle in a
+  suitable terminal or PTY.
 
-- Read `display_enabled` at build time. Only enabled artifacts import the C wrapper
-  and link notcurses/libc. A headless build and normal core tests must work without
-  the notcurses development package.
-- With Zig 0.16.0, configure system-library linking on the relevant
-  `std.Build.Module` and its `link_libc` setting; check its current signatures.
-- Use `@cImport` and a namespaced `pub const c` or explicit public aliases.
-  `pub usingnamespace` is unavailable in Zig 0.16.0.
-- Add thin C error/default wrappers only as actual call sites require them.
-- Add `zig build test-display` for display-specific checks when this phase begins.
-  This command does not exist yet.
-- Document the system's notcurses development package and header/library discovery.
+Exit criterion: inspect and control a running simulation, then verify that display
+enabled/disabled gives identical logical simulation state for a fixed instruction budget.
 
-#### Display and Views (`src/display/`)
-
-- Initialize/tear down notcurses with cleanup on partially successful initialization.
-- Start with a soup map and basic statistics; then add creature inspection and a
-  size histogram.
-- Render read-only state at a throttled rate on the simulation thread between completed
-  instructions/batches. No cross-thread shared-state design is needed initially.
-- Map input to quit, pause/resume, selection, and later single-step commands.
-  Define single-step as one completed instruction, not a whole slice.
-- While paused, keep polling input and rendering without advancing counters or RNG.
-- Handle terminal resizing and empty/extinct populations.
-- Validate a selection's organism identity when slots are recycled.
-
-Compile/link checks can run without an interactive terminal. Actual notcurses
-initialization/rendering tests require a suitable terminal or PTY; do not assume a
-headless mode exists. Keep most view-mapping tests independent of terminal setup.
-Verify display enabled/disabled produces the same simulation state for a fixed run.
+Learning checkpoint: explain why observing state must not change execution or randomness.
 
 Useful Ziglings:
 [093_hello_c](../ziglings/exercises/093_hello_c.zig),
@@ -733,44 +720,47 @@ Useful Ziglings:
 [045_optionals](../ziglings/exercises/045_optionals.zig), and
 [027_defer](../ziglings/exercises/027_defer.zig).
 
-### Phase 7: Polish
+### Phase 7: CLI and Performance
 
-Goal: make experiments convenient and optimize only measured bottlenecks.
+Goal: make the completed simulation convenient to run and optimize measured bottlenecks.
 
 #### CLI (`src/main.zig`)
 
-- Show active configuration and run metadata.
-- Parse bounded run length, output location/run ID, and supported pause/resume options.
-- Keep shape/feature changes in `src/config.zon`. A binary compiled without display
-  cannot enable it at runtime; a display-enabled binary may offer headless execution.
-- Reject invalid arguments and avoid accidental overwriting of prior run output.
-- Report extinction, completed budgets, and persistence failures clearly.
-- Keep shutdown flushing and terminal cleanup reliable.
+Extend existing configuration printing and the basic ancestor execution path from
+Phase 3 with controls for the features introduced in Phases 4–6.
+
+- [ ] Parse instruction budgets, output directory/run ID, checkpoint save/load, and
+  headless execution where display support is compiled in. Reject invalid arguments
+  and protect existing run output from accidental overwriting.
+- [ ] Keep shape, mutation settings, seed, and compiled features in `src/config.zon`.
+  Record effective runtime options alongside that configuration in run metadata.
+- [ ] Report budget completion, extinction, global instruction-limit exhaustion,
+  and persistence failures clearly. Preserve output flushing and terminal cleanup.
+
+Exit criterion: start a bounded experiment and resume a checkpoint through the CLI,
+with useful diagnostics for invalid arguments and output failures.
 
 #### Performance
 
-Profile instruction dispatch, allocation scans, queue operations, and rendering only
-after deterministic replication and replay tests pass. Benchmark headless runs with
-output disabled to separate simulation cost from I/O cost.
-
-Possible later exercises include more compact stable-storage pools, allocation indexing,
-buffered/threaded writers, and specialized dispatch. Preserve the established behavior
-with fixed-seed comparisons; do not add these before a measured need or explicit
-learning objective.
+Profile instruction dispatch, allocation scans, queue operations, and rendering after
+replication and checkpoint-replay tests pass. Benchmark headless runs with output
+disabled to separate simulation cost from I/O. Optimize one measured bottleneck at
+a time, preserving stable storage and deterministic behavior with fixed-seed comparisons.
 
 ---
 
 ## Planned File Layout
 
-This is the intended destination; some modules do not exist yet.
+Core paths below exist. Entries marked planned are future additions.
+Split display files only as their views are introduced.
 
 ```text
 src/
     config.zon
+    config.zig                # validated production configuration exports
     main.zig
     root.zig                  # public API and core test reachability
     core/
-        config.zig
         instruction.zig
         soup.zig
         cpu.zig
@@ -780,28 +770,25 @@ src/
         simulation.zig
         scheduler.zig
         ancestor.zig
-        mutation.zig
-        genebank.zig
-    persistence/
+        mutation.zig          # planned, Phase 4
+        genebank.zig          # planned, Phase 4
+    persistence/              # planned, Phases 4–5
         lineage.zig
         snapshot.zig
         state.zig
-    display/
-        notcurses.zig
-        display.zig
-        soup_view.zig
-        stats_view.zig
-        creature_view.zig
-        size_histogram.zig
-output/<run_id>/              # runtime output, gitignored
+    display/                  # planned, Phase 6: notcurses integration and views
+output/<run_id>/              # planned default run directory
     metadata.json
     lineage.jsonl
-    snapshots/
+    snapshots/                # observational summaries
     checkpoints/
 plan/PLAN.md
 reference/                   # read-only documentation
 ziglings/                    # concept exercises
 ```
+
+When runtime output is introduced, add its default directory to `.gitignore`;
+the current ignore file does not include it.
 
 ## Testing Strategy
 
@@ -809,22 +796,21 @@ Tests should demonstrate a rule or reveal a boundary failure. Start with small,
 hand-checkable soups and deterministic CPU states; avoid tests that simply mirror
 the implementation.
 
-1. Unit tests: config validation, all opcode round trips, arithmetic/stack boundaries,
-   atomic soup operations, search/skip semantics, queue invariants, deterministic mutation,
-   genotype canonicalization, and serialization.
-2. Integration tests: mutation-free ancestor replication across generations, correct
-   ownership transfer/reaping, exact run budgets, ordered lineage, snapshot intervals,
-   and deterministic checkpoint continuation.
-3. Display tests: compilation/linking and pure view mapping, plus terminal lifecycle
-   checks in an appropriate terminal environment.
+1. Retain existing CPU/template, soup, scheduler, and lifecycle tests, including
+   ancestor replication, counter saturation, and exact/split run budgets. Add direct
+   low-level soup boundary checks for the unfinished Phase 1 guarantees.
+2. Add deterministic mutation, genebank, and ordered-lineage checks with Phase 4,
+   then summary/checkpoint checks with Phase 5. Use `std.testing.allocator` for
+   allocation-bearing tests and exercise host failure cleanup.
+3. Add display compilation/linking and pure view-mapping checks in Phase 6, with
+   terminal lifecycle tests in an appropriate terminal or PTY.
 
-Wire intended modules into test roots: Zig does not recursively discover every
-`test` block in every source file. Keep external display dependencies out of the core
-test graph. Use `std.testing.allocator` for allocation-bearing tests to expose leaks.
-
-`zig build test` is the existing command and should grow to cover core unit and
-integration tests. Add `zig build test-display` in Phase 6; there is no current
-`test-integration` step.
+`zig build test` already includes core unit and lifecycle integration tests through
+`src/root.zig`. `zig test src/root.zig` runs the library-root graph directly. Import
+new modules into the appropriate test roots as they are introduced: Zig does not
+discover every source file's tests automatically. Keep external display dependencies
+out of the core test graph. `zig build test-display` is planned for Phase 6;
+there is no current `test-integration` step.
 
 Do not assert that evolution must produce a particular population shape or that every
 daughter must differ. Mutations are stochastic, and a bit flip can later be reversed.
@@ -833,18 +819,18 @@ runs, and structural invariants for larger runs.
 
 ## Key Design Decisions
 
-| Decision | Initial choice | Why |
+| Decision | Current implementation or planned direction | Why |
 | --- | --- | --- |
-| Instruction storage | Canonical low-5-bit instructions in byte cells | Tierra's byte addressing and 32-opcode alphabet |
+| Instruction storage | `[size]Instruction`, with 32 `enum(u8)` values | Direct execution and valid opcodes without a decoding layer |
 | Addressing | Circular CPU access, linear allocations, `u16` addresses | Explicit bounds without split allocation handles |
 | Register arithmetic | Defined 16-bit wrapping, separate from address normalization | Mutated programs cannot rely on host overflow behavior |
-| Config | Typed compile-time object from one ZON file | One production source of truth; small test configurations |
-| Creature storage | Inline fixed pool bounded by soup capacity, occupancy metadata, free-slot list | Stable addresses and no per-birth host allocation |
+| Config | `src/config.zig` validates ZON and exports typed constants | One production source of truth; factories also accept small test configs |
+| Creature storage | Fixed optional pool and inline-buffer-backed free-slot list | Stable addresses and no per-birth host allocation |
 | Simulation initialization | Initialize caller-provided final storage in place, then inoculate separately | Explicit storage ownership; internal pointers remain valid |
-| Identity | Reusable slot ID plus persistent organism ID | Fast ownership checks and unambiguous lineage |
+| Identity | Reusable `slot_id: u16` plus persistent `organism_id: u64` | Fast ownership checks and unambiguous lineage |
 | Queues | Separate intrusive slicer/reaper nodes | Constant-time linking with explicit lifetime rules |
-| RNG | Separate explicitly seeded streams | Reproducible evolution independent of observation |
-| Genebank | Owned canonical genomes and byte comparison | Stable identity despite soup changes/hash collisions |
-| Persistence | Synchronous buffered output first; data-only versioned checkpoints | Learn ownership and errors before concurrency |
-| Display | Optional C import and module-level linking | Headless core remains usable without notcurses |
-| Error handling | VM outcomes; host failures use error unions | Preserve simulated faults while surfacing infrastructure errors |
+| RNG | Local seeded soup initialization; separate mutation streams planned | Reproducible evolution independent of observation |
+| Genebank (planned) | Owned instruction sequences and birth-genotype identity | Stable history despite soup changes and slot reuse |
+| Persistence (planned) | Synchronous buffered output; data-only versioned checkpoints | Explicit ownership, error handling, and deterministic continuation |
+| Display (planned) | Optional C integration, read-only views on the simulation thread | Headless core remains usable without notcurses |
+| Error handling | `ExecResult` for VM outcomes; error unions for direct lifecycle calls and future host failures | Keep simulated faults distinct from infrastructure errors |

@@ -1,7 +1,7 @@
 const std = @import("std");
 pub const config = @import("config.zig");
 pub const Simulation = @import("sim/simulation.zig").Simulation;
-const ancestor_genome = @import("sim/ancestor.zig").ancestor_genome;
+pub const ancestor_genome = @import("sim/ancestor.zig").ancestor_genome;
 
 test {
     _ = Simulation;
